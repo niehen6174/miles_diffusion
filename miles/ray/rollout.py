@@ -378,6 +378,16 @@ class RolloutManager:
         if any(getattr(sample, "reward", None) is None or "ocr" not in sample.reward for sample in samples):
             raise ValueError("Missing OCR reward in rollout samples; expected reward['ocr'] for all samples.")
         train_data["reward_ocr"] = [sample.reward["ocr"] for sample in samples]
+        if train_data["reward_ocr"]:
+            reward_ocr = train_data["reward_ocr"]
+            zero_ratio = float(np.mean([1.0 if r == 0.0 else 0.0 for r in reward_ocr]))
+            logger.info(
+                "rollout reward_ocr stats: n=%d min=%.6f max=%.6f zero_ratio=%.6f",
+                len(reward_ocr),
+                float(min(reward_ocr)),
+                float(max(reward_ocr)),
+                zero_ratio,
+            )
         # Pass prompt text for diffusion training to recompute embeddings.
         train_data["prompt"] = [sample.prompt for sample in samples]
 
@@ -471,6 +481,7 @@ class RolloutManager:
             for key in [
                 "raw_reward",
                 "total_lengths",
+                "reward_ocr",
             ]:
                 if key not in data:
                     continue

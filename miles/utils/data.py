@@ -292,5 +292,8 @@ def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
     if "raw_reward" in rollout_data:
         raw_reward = rollout_data["raw_reward"]
         rollout_data["raw_reward"] = [raw_reward[i] for i in partition]
+    if "reward_ocr" in rollout_data:
+        reward_ocr = rollout_data["reward_ocr"]
+        rollout_data["reward_ocr"] = [reward_ocr[i] for i in partition]
 
     return rollout_data

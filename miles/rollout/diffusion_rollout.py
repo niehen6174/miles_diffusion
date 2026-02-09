@@ -394,7 +394,9 @@ def generate_rollout(
         if reward_ocr_vals:
             log_dict["reward_ocr"] = float(np.mean(reward_ocr_vals))
 
-    tracking_utils.log(args, log_dict, step_key="rollout/step")
+    # Avoid logging rollout metrics to W&B so all curves align on training global_step.
+    if not getattr(args, "use_wandb", False):
+        tracking_utils.log(args, log_dict, step_key="rollout/step")
 
     if evaluation:
         return RolloutFnEvalOutput(

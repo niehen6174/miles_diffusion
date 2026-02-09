@@ -151,6 +151,17 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             reduced["inner_epoch"] = 0.0
             reduced["rollout/step"] = compute_rollout_step(self.args, rollout_id)
             reduced["global_step"] = float(step)
+            if "reward_ocr" in reduced:
+                logger.info(
+                    "train step=%s reward_avg=%.6f reward_ori_avg=%.6f reward_ocr=%.6f reward_ocr_min=%.6f reward_ocr_max=%.6f reward_ocr_zero_ratio=%.6f",
+                    int(step),
+                    reduced.get("reward_avg", 0.0),
+                    reduced.get("reward_ori_avg", 0.0),
+                    reduced.get("reward_ocr", 0.0),
+                    reduced.get("reward_ocr_min", 0.0),
+                    reduced.get("reward_ocr_max", 0.0),
+                    reduced.get("reward_ocr_zero_ratio", 0.0),
+                )
             tracking_utils.log(self.args, reduced, step_key="global_step")
         else:
             dist.gather_object(
@@ -374,6 +385,8 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             )
             accum_steps = max(1, int(getattr(self.args, "diffusion_grad_accum_steps", 1)))
             accum_counter = 0
+            # How many backward calls to accumulate before stepping.
+            effective_accum = max(1, accum_steps * num_train_timesteps)
 
             log_stats = {
                 "loss": [],
@@ -386,6 +399,9 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 "reward_avg": [],
                 "reward_ori_avg": [],
                 "reward_ocr": [],
+                "reward_ocr_min": [],
+                "reward_ocr_max": [],
+                "reward_ocr_zero_ratio": [],
                 "raw_reward_min": [],
                 "raw_reward_max": [],
             }
@@ -459,8 +475,9 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
 
                 # Accumulate gradients over timesteps (flow_grpo-style).
                 num_timesteps = timesteps.shape[1]
-                self.optimizer.zero_grad(set_to_none=True)
-                effective_accum = accum_steps * num_timesteps
+                # Only clear grads when starting a new accumulation window.
+                if accum_counter % effective_accum == 0:
+                    self.optimizer.zero_grad(set_to_none=True)
                 for j in range(num_timesteps):
                     # Compute log_prob_new for this timestep only to avoid retaining graphs for all steps.
                     if self.args.diffusion_cfg:
@@ -525,6 +542,11 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                     log_stats["reward_avg"].append(batch_rewards.mean().detach().float())
                     log_stats["reward_ori_avg"].append(batch_raw_rewards.mean().detach().float())
                     log_stats["reward_ocr"].append(batch_reward_ocr.mean().detach().float())
+                    log_stats["reward_ocr_min"].append(batch_reward_ocr.min().detach().float())
+                    log_stats["reward_ocr_max"].append(batch_reward_ocr.max().detach().float())
+                    log_stats["reward_ocr_zero_ratio"].append(
+                        torch.mean((batch_reward_ocr == 0).float()).detach().float()
+                    )
                     log_stats["raw_reward_min"].append(batch_raw_rewards.min().detach().float())
                     log_stats["raw_reward_max"].append(batch_raw_rewards.max().detach().float())
 
