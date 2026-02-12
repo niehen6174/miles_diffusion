@@ -16,7 +16,7 @@ from flow_grpo.ema import EMAModuleWrapper
 from miles.ray.train_actor import TrainRayActor
 from miles.utils.context_utils import with_defer
 from miles.utils.data import process_rollout_data
-from miles.utils.diffusion_protocol import broadcast_advantage, validate_train_inputs
+from miles.utils.diffusion_protocol import broadcast_advantage
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.memory_utils import clear_memory, print_memory
 from miles.utils.timer import Timer, timer
@@ -27,7 +27,6 @@ from miles.utils import tracking_utils
 from .actor import apply_fsdp2, move_torch_optimizer
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
-from ..training_utils.log_utils import gather_log_data
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +136,11 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
 
     def _gather_and_log_metrics(self, rollout_id: int, log_dict: dict[str, float], step: int) -> None:
         """Reduce per-rank scalars and log with Flow-GRPO-aligned keys."""
+        if "lr" not in log_dict and hasattr(self, "optimizer"):
+            try:
+                log_dict["lr"] = float(self.optimizer.param_groups[0]["lr"])
+            except Exception:
+                pass
         if self.parallel_state.dp_cp_rank == 0:
             dp_size = self.parallel_state.dp_cp_size
             gathered = [None] * dp_size
@@ -153,8 +157,17 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             reduced["global_step"] = float(step)
             if "reward_ocr" in reduced:
                 logger.info(
-                    "train step=%s reward_avg=%.6f reward_ori_avg=%.6f reward_ocr=%.6f reward_ocr_min=%.6f reward_ocr_max=%.6f reward_ocr_zero_ratio=%.6f",
+                    "train step=%s lr=%.6g weight_decay=%.6g adam_beta1=%.3f adam_beta2=%.3f adam_eps=%.2e warmup_ratio=%.3f clipfrac=%.6f clipfrac_gt_one=%.6f clipfrac_lt_one=%.6f reward_avg=%.6f reward_ori_avg=%.6f reward_ocr=%.6f reward_ocr_min=%.6f reward_ocr_max=%.6f reward_ocr_zero_ratio=%.6f",
                     int(step),
+                    reduced.get("lr", 0.0),
+                    float(getattr(self.args, "weight_decay", -1.0)),
+                    float(getattr(self.args, "adam_beta1", -1.0)),
+                    float(getattr(self.args, "adam_beta2", -1.0)),
+                    float(getattr(self.args, "adam_eps", -1.0)),
+                    float(getattr(self.args, "warmup_ratio", -1.0)),
+                    reduced.get("clipfrac", -1.0),
+                    reduced.get("clipfrac_gt_one", -1.0),
+                    reduced.get("clipfrac_lt_one", -1.0),
                     reduced.get("reward_avg", 0.0),
                     reduced.get("reward_ori_avg", 0.0),
                     reduced.get("reward_ocr", 0.0),
@@ -196,68 +209,6 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
             prompt_embeds = torch.cat([neg_prompt_embeds, prompt_embeds], dim=0)
             pooled_prompt_embeds = torch.cat([neg_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
         return prompt_embeds, pooled_prompt_embeds
-
-    def _compute_log_prob_new(
-        self,
-        latents: torch.Tensor,
-        next_latents: torch.Tensor,
-        timesteps: torch.Tensor,
-        prompt_embeds: torch.Tensor,
-        pooled_prompt_embeds: torch.Tensor,
-    ) -> torch.Tensor:
-        # Ensure scheduler tensors (timesteps/sigmas) live on the same device as latents.
-        device = latents.device
-        steps = timesteps.shape[1]
-        if hasattr(self.pipeline.scheduler, "set_timesteps"):
-            self.pipeline.scheduler.set_timesteps(steps, device=device)
-        if hasattr(self.pipeline.scheduler, "timesteps") and self.pipeline.scheduler.timesteps is not None:
-            self.pipeline.scheduler.timesteps = self.pipeline.scheduler.timesteps.to(device)
-        if hasattr(self.pipeline.scheduler, "sigmas") and self.pipeline.scheduler.sigmas is not None:
-            self.pipeline.scheduler.sigmas = self.pipeline.scheduler.sigmas.to(device)
-        if hasattr(self.pipeline.scheduler, "timesteps") and self.pipeline.scheduler.timesteps is not None:
-            # Use scheduler timesteps to avoid float-mismatch/index lookup failures.
-            sched_ts = self.pipeline.scheduler.timesteps[:steps].to(device)
-            timesteps = sched_ts.unsqueeze(0).expand(latents.shape[0], -1)
-
-        # Recompute per-step log_prob under the current model parameters.
-        log_probs = []
-        for j in range(timesteps.shape[1]):
-            if self.args.diffusion_cfg:
-                # CFG: duplicate batch for uncond/cond pass, then combine.
-                latent_model_input = torch.cat([latents[:, j]] * 2)
-                timestep = torch.cat([timesteps[:, j]] * 2)
-                noise_pred = self.model(
-                    hidden_states=latent_model_input,
-                    timestep=timestep,
-                    encoder_hidden_states=prompt_embeds,
-                    pooled_projections=pooled_prompt_embeds,
-                    return_dict=False,
-                )[0]
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + self.args.diffusion_guidance_scale * (
-                    noise_pred_text - noise_pred_uncond
-                )
-            else:
-                noise_pred = self.model(
-                    hidden_states=latents[:, j],
-                    timestep=timesteps[:, j],
-                    encoder_hidden_states=prompt_embeds,
-                    pooled_projections=pooled_prompt_embeds,
-                    return_dict=False,
-                )[0]
-
-            # Use the same SDE step as rollout to compute log_prob_new.
-            _, log_prob, _, _ = sde_step_with_logprob(
-                self.pipeline.scheduler,
-                noise_pred.float(),
-                timesteps[:, j],
-                latents[:, j].float(),
-                prev_sample=next_latents[:, j].float(),
-                noise_level=self.args.diffusion_noise_level,
-            )
-            log_probs.append(log_prob)
-
-        return torch.stack(log_probs, dim=1)
 
     def _calculate_zero_std_ratio(
         self, prompts: list[str], rewards: list[float]
@@ -425,6 +376,9 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 timesteps = torch.stack([m["timesteps"] for m in batch_meta]).to(
                     torch.cuda.current_device(), dtype=torch.float32
                 )
+                sigmas = torch.stack([m["sigmas"] for m in batch_meta]).to(
+                    torch.cuda.current_device(), dtype=torch.float32
+                )
                 latents = torch.stack([m["latents"] for m in batch_meta]).to(
                     torch.cuda.current_device(), dtype=torch.float32
                 )
@@ -438,6 +392,17 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 # Optional: train on a fraction of timesteps.
                 if fraction < 1.0:
                     timesteps = timesteps[:, :num_train_timesteps]
+
+                # Align sigmas length with timesteps (FlowMatch expects T+1 sigmas).
+                if sigmas.shape[1] >= timesteps.shape[1] + 1:
+                    sigmas = sigmas[:, : timesteps.shape[1] + 1]
+                elif sigmas.shape[1] == timesteps.shape[1]:
+                    # Pad with last sigma to avoid out-of-bounds in sde_step_with_logprob.
+                    sigmas = torch.cat([sigmas, sigmas[:, -1:]], dim=1)
+                else:
+                    raise ValueError(
+                        f"Invalid sigmas length {sigmas.shape[1]} for timesteps {timesteps.shape[1]}"
+                    )
                     latents = latents[:, :num_train_timesteps]
                     next_latents = next_latents[:, :num_train_timesteps]
                     log_prob_old = log_prob_old[:, :num_train_timesteps]
@@ -454,18 +419,27 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 prompt_embeds = prompt_embeds.detach()
                 pooled_prompt_embeds = pooled_prompt_embeds.detach()
 
-                # Prepare scheduler timesteps on the same device (once per micro-batch).
+                # Prepare scheduler timesteps/sigmas on the same device (once per micro-batch).
                 device = timesteps.device
                 steps = timesteps.shape[1]
+                rollout_ts = timesteps[0].detach()
+                rollout_sigmas = sigmas[0].detach()
                 if hasattr(self.pipeline.scheduler, "set_timesteps"):
+                    # Initialize internal buffers; we will override with rollout-provided values.
                     self.pipeline.scheduler.set_timesteps(steps, device=device)
-                if hasattr(self.pipeline.scheduler, "timesteps") and self.pipeline.scheduler.timesteps is not None:
-                    self.pipeline.scheduler.timesteps = self.pipeline.scheduler.timesteps.to(device)
-                if hasattr(self.pipeline.scheduler, "sigmas") and self.pipeline.scheduler.sigmas is not None:
-                    self.pipeline.scheduler.sigmas = self.pipeline.scheduler.sigmas.to(device)
-                if hasattr(self.pipeline.scheduler, "timesteps") and self.pipeline.scheduler.timesteps is not None:
-                    sched_ts = self.pipeline.scheduler.timesteps[:steps].to(device)
-                    timesteps = sched_ts.unsqueeze(0).expand(latents.shape[0], -1)
+                if hasattr(self.pipeline.scheduler, "timesteps"):
+                    self.pipeline.scheduler.timesteps = rollout_ts.to(device)
+                if hasattr(self.pipeline.scheduler, "sigmas"):
+                    self.pipeline.scheduler.sigmas = rollout_sigmas.to(device)
+                if not getattr(self, "_logged_rollout_scheduler_alignment", False):
+                    print(
+                        "[diffusion] rollout/scheduler alignment: "
+                        f"timesteps head={rollout_ts[:3].tolist()} "
+                        f"sigmas head={rollout_sigmas[:3].tolist()} "
+                        f"sigmas_len={int(rollout_sigmas.numel())} steps={int(steps)}",
+                        flush=True,
+                    )
+                    self._logged_rollout_scheduler_alignment = True
 
                 advantages = torch.clamp(
                     advantage,

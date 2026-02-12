@@ -181,6 +181,7 @@ def _make_generators(prompts: list[str], base_seed: int, seed_offset: int) -> li
 def _fill_sample_metadata(
     samples: list[Sample],
     timesteps: torch.Tensor,
+    sigmas: torch.Tensor,
     latents: torch.Tensor,
     next_latents: torch.Tensor,
     log_prob_old: torch.Tensor,
@@ -188,6 +189,7 @@ def _fill_sample_metadata(
 ) -> None:
     # Move large rollout tensors to CPU and store per-sample slices in metadata.
     timesteps_cpu = timesteps.cpu()
+    sigmas_cpu = sigmas.cpu()
     latents_cpu = latents.cpu()
     next_latents_cpu = next_latents.cpu()
     log_prob_old_cpu = log_prob_old.cpu()
@@ -196,6 +198,7 @@ def _fill_sample_metadata(
     for i, sample in enumerate(samples):
         metadata = {
             "timesteps": timesteps_cpu.clone(),
+            "sigmas": sigmas_cpu.clone(),
             "latents": latents_cpu[i].clone(),
             "next_latents": next_latents_cpu[i].clone(),
             "log_prob_old": log_prob_old_cpu[i].clone(),
@@ -324,6 +327,10 @@ def _run_rollout_group(
 
     # Reconstruct timesteps from scheduler so training can recompute log_prob_new.
     timesteps, _ = retrieve_timesteps(pipeline.scheduler, num_steps, torch.device("cpu"))
+    sigmas = getattr(pipeline.scheduler, "sigmas", None)
+    if sigmas is None:
+        raise ValueError("Scheduler missing sigmas; cannot align diffusion rollout metadata.")
+    sigmas = torch.as_tensor(sigmas)
 
     # Convert list trajectories into (B, T, C, H, W) tensors.
     latents = torch.stack(all_latents[:-1], dim=1)
@@ -336,6 +343,7 @@ def _run_rollout_group(
     _fill_sample_metadata(
         group,
         timesteps=timesteps,
+        sigmas=sigmas,
         latents=latents,
         next_latents=next_latents,
         log_prob_old=log_prob_old,

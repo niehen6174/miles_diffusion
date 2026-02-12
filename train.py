@@ -78,6 +78,7 @@ def train(args):
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
             ray.get(rollout_manager.eval.remote(rollout_id))
 
+        #generating rollout data
         rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
         logger.info(f"train: rollout {rollout_id} generate done")
 
@@ -88,6 +89,9 @@ def train(args):
             critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref)
             if rollout_id >= args.num_critic_only_steps:
                 logger.info(f"train: rollout {rollout_id} actor train start")
+                #actual training happens here, which can be overlapped with critic training of the next rollout.
+                #note that ray.get is needed to sync the training before updating weights, which happens in the next iteration or at the end of this iteration.
+                #the name async_train is a bit misleading because the training is still synchronous, but the function returns immediately and the actual training happens in the background until ray.get is called.
                 ray.get(actor_model.async_train(rollout_id, rollout_data_ref))
                 logger.info(f"train: rollout {rollout_id} actor train done")
             ray.get(critic_train_handle)
