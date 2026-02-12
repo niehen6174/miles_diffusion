@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import json
+import os
 from argparse import Namespace
 from typing import Any
 
@@ -35,6 +36,44 @@ _STAT_TRACKER: PerPromptStatTracker | None = None
 _REWARD_SPEC = None
 _ROLLOUT_PG = None
 _ROLLOUT_WORKERS = None
+_LAST_ROLLOUT_WEIGHT_VERSION = -1
+
+
+def _get_rollout_weight_paths(args: Namespace) -> tuple[str, str]:
+    base_dir = getattr(args, "save", None) or os.path.join("/tmp", "miles_rollout_weights")
+    weights_path = os.path.join(base_dir, "diffusion_transformer.pt")
+    meta_path = os.path.join(base_dir, "diffusion_transformer.meta.json")
+    return weights_path, meta_path
+
+
+def _maybe_load_rollout_weights(args: Namespace, pipeline: StableDiffusion3Pipeline) -> None:
+    global _LAST_ROLLOUT_WEIGHT_VERSION
+
+    weights_path, meta_path = _get_rollout_weight_paths(args)
+    if not os.path.exists(meta_path) or not os.path.exists(weights_path):
+        return
+
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        version = int(meta.get("version", -1))
+    except Exception:
+        return
+
+    if version <= _LAST_ROLLOUT_WEIGHT_VERSION:
+        return
+
+    state = torch.load(weights_path, map_location="cpu")
+    try:
+        dtype = next(pipeline.transformer.parameters()).dtype
+    except StopIteration:
+        dtype = None
+    if dtype is not None:
+        state = {k: v.to(dtype=dtype) if isinstance(v, torch.Tensor) else v for k, v in state.items()}
+
+    pipeline.transformer.load_state_dict(state, strict=True)
+    _LAST_ROLLOUT_WEIGHT_VERSION = version
+    logger.info("[rollout] loaded transformer weights version=%s from %s", version, weights_path)
 
 
 def set_rollout_pg(pg) -> None:
@@ -286,6 +325,7 @@ def _run_rollout_group(
 ) -> list[Sample]:
     device = _get_device(args)
     pipeline = _get_pipeline(args)
+    _maybe_load_rollout_weights(args, pipeline)
     if device.type == "cuda":
         torch.cuda.set_device(device)
 
@@ -331,6 +371,12 @@ def _run_rollout_group(
     if sigmas is None:
         raise ValueError("Scheduler missing sigmas; cannot align diffusion rollout metadata.")
     sigmas = torch.as_tensor(sigmas)
+    if not getattr(_run_rollout_group, "_logged_sigmas_len", False):
+        print(
+            f"[rollout] timesteps_len={int(timesteps.numel())} sigmas_len={int(sigmas.numel())}",
+            flush=True,
+        )
+        _run_rollout_group._logged_sigmas_len = True
 
     # Convert list trajectories into (B, T, C, H, W) tensors.
     latents = torch.stack(all_latents[:-1], dim=1)

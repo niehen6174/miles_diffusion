@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from argparse import Namespace
+import json
 
 import torch
 import torch.distributed as dist
@@ -27,6 +28,8 @@ from miles.utils import tracking_utils
 from .actor import apply_fsdp2, move_torch_optimizer
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+from torch.distributed.tensor import DTensor
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +127,48 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
         logger.warning("DiffusionFSDPTrainRayActor save_model is not implemented; skipping checkpoint save.")
 
     def update_weights(self) -> None:  # type: ignore[override]
-        # Diffusion rollout does not use rollout engines yet, so there is nothing to sync.
+        # Diffusion rollout uses a local pipeline; sync weights via disk.
+        rank = dist.get_rank()
+        logger.info("update_weights start (rank=%s)", rank)
+        base_dir = getattr(self.args, "save", None) or os.path.join("/tmp", "miles_rollout_weights")
+        os.makedirs(base_dir, exist_ok=True)
+        weights_path = os.path.join(base_dir, "diffusion_transformer.pt")
+        meta_path = os.path.join(base_dir, "diffusion_transformer.meta.json")
+
+        # Export full state dict through FSDP2 checkpoint API.
+        # This avoids persisting local shards and prevents rollout-side shape mismatch.
+        options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+        model_state = get_model_state_dict(self.model, options=options)
+
+        converted_state: dict[str, torch.Tensor] = {}
+        dtensor_count = 0
+        # Iterate on all ranks; DTensor.full_tensor may require collective participation.
+        for k, v in list(model_state.items()):
+            if isinstance(v, DTensor):
+                dtensor_count += 1
+                v = v.full_tensor()
+            if isinstance(v, torch.Tensor) and rank == 0:
+                converted_state[k] = v.detach().cpu()
+
+        if rank == 0:
+            logger.info("update_weights rank=0 converted state dict (dtensor_count=%s)", dtensor_count)
+            logger.info("update_weights rank=0 start torch.save: %s", weights_path)
+            torch.save(converted_state, weights_path)
+            logger.info("update_weights rank=0 torch.save done: %s", weights_path)
+            version = int(getattr(self, "_rollout_weight_version", 0)) + 1
+            meta = {"version": version}
+            tmp_meta_path = meta_path + ".tmp"
+            with open(tmp_meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f)
+            os.replace(tmp_meta_path, meta_path)
+            self._rollout_weight_version = version
+            logger.info("update_weights wrote version=%s", version)
+        else:
+            logger.info("update_weights skip write on rank=%s", rank)
+
+        # Keep rank progress aligned; rank0 may take much longer due disk write.
+        dist.barrier(group=get_gloo_group())
+        logger.info("update_weights done (rank=%s)", rank)
         return
 
     def connect_actor_critic(self, critic_group) -> None:  # type: ignore[override]
@@ -424,6 +468,16 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 steps = timesteps.shape[1]
                 rollout_ts = timesteps[0].detach()
                 rollout_sigmas = sigmas[0].detach()
+                if not getattr(self, "_logged_rollout_sigmas_len", False):
+                    print(
+                        f"[train] timesteps_len={int(steps)} sigmas_len={int(rollout_sigmas.numel())}",
+                        flush=True,
+                    )
+                    self._logged_rollout_sigmas_len = True
+                if rollout_sigmas.numel() < 2:
+                    raise ValueError(
+                        f"Invalid sigmas length {int(rollout_sigmas.numel())} for timesteps {int(steps)}"
+                    )
                 if hasattr(self.pipeline.scheduler, "set_timesteps"):
                     # Initialize internal buffers; we will override with rollout-provided values.
                     self.pipeline.scheduler.set_timesteps(steps, device=device)

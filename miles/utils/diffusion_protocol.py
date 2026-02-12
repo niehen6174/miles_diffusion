@@ -10,7 +10,7 @@ import torch
 class DiffusionRolloutSpec:
     # Required rollout keys to reconstruct per-step log_prob_new and PPO ratio in training.
     #latents and next latents for log_prob_new in training, log_prob_old used with log_prob_new (in training) to get ratio.
-    required_keys: tuple[str, ...] = ("timesteps", "latents", "next_latents", "log_prob_old")
+    required_keys: tuple[str, ...] = ("timesteps", "sigmas", "latents", "next_latents", "log_prob_old")
     # Optional rollout keys for KL regularization or debugging.
     #mean of distribution p(x_{t+1} | x_t), for KL
     optional_keys: tuple[str, ...] = ("prev_latents_mean",)
@@ -59,12 +59,15 @@ def validate_rollout_metadata(metadata: dict) -> list[str]:
         return errors
 
     timesteps = metadata["timesteps"]
+    sigmas = metadata["sigmas"]
     latents = metadata["latents"]
     next_latents = metadata["next_latents"]
     log_prob_old = metadata["log_prob_old"]
 
     if not isinstance(timesteps, torch.Tensor):
         errors.append("timesteps must be a torch.Tensor")
+    if not isinstance(sigmas, torch.Tensor):
+        errors.append("sigmas must be a torch.Tensor")
     if not isinstance(latents, torch.Tensor):
         errors.append("latents must be a torch.Tensor")
     if not isinstance(next_latents, torch.Tensor):
@@ -79,6 +82,12 @@ def validate_rollout_metadata(metadata: dict) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
         b_t, t_t = 0, 0
+
+    try:
+        b_s, t_s = _normalize_time_major(sigmas)
+    except ValueError as exc:
+        errors.append(str(exc))
+        b_s, t_s = 0, 0
 
     try:
         b_l, t_l = _normalize_latents(latents)
@@ -100,6 +109,8 @@ def validate_rollout_metadata(metadata: dict) -> list[str]:
 
     if b_t and b_l and b_t != b_l:
         errors.append(f"batch mismatch: timesteps batch {b_t} != latents batch {b_l}")
+    if b_s and b_t and b_s != b_t:
+        errors.append(f"batch mismatch: sigmas batch {b_s} != timesteps batch {b_t}")
     if b_l and b_n and b_l != b_n:
         errors.append(f"batch mismatch: latents batch {b_l} != next_latents batch {b_n}")
     if b_l and b_p and b_l != b_p:
@@ -107,6 +118,10 @@ def validate_rollout_metadata(metadata: dict) -> list[str]:
 
     if t_t and t_l and t_t != t_l:
         errors.append(f"timestep mismatch: timesteps steps {t_t} != latents steps {t_l}")
+    if t_s and t_t and t_s not in (t_t, t_t + 1):
+        errors.append(
+            f"timestep mismatch: sigmas steps {t_s} not in (timesteps {t_t}, timesteps+1 {t_t + 1})"
+        )
     if t_l and t_n and t_l != t_n:
         errors.append(f"timestep mismatch: latents steps {t_l} != next_latents steps {t_n}")
     if t_l and t_p and t_l != t_p:

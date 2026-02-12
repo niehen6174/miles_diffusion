@@ -45,7 +45,9 @@ class TrainRayActor(RayActor):
         # TODO: currently this doesn't work as ray has already set torch.cuda.device_count().
         # os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         # os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
-        os.environ["LOCAL_RANK"] = str(get_local_gpu_id())
+        local_gpu_id = int(ray.get_gpu_ids()[0])
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(local_gpu_id)
+        os.environ["LOCAL_RANK"] = "0"
 
     def init(self, args, role, with_ref=False):
         self.args = args
@@ -56,6 +58,13 @@ class TrainRayActor(RayActor):
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(f"cuda:{local_rank}")
+        logger.info(
+            "TrainRayActor rank=%s local_rank=%s CUDA_VISIBLE_DEVICES=%s cuda_device=%s",
+            os.environ.get("RANK"),
+            local_rank,
+            os.environ.get("CUDA_VISIBLE_DEVICES"),
+            torch.cuda.current_device(),
+        )
 
         # Use hybrid backend when FSDP CPU offload is enabled with a CPU backend
         backend = args.distributed_backend
@@ -64,9 +73,13 @@ class TrainRayActor(RayActor):
             backend = f"cpu:{cpu_backend},cuda:{args.distributed_backend}"
             logger.info(f"FSDP CPU offload enabled, using hybrid backend: {backend}")
 
+        device_id = None
+        if torch.cuda.is_available() and "cuda" in str(backend):
+            device_id = torch.device(f"cuda:{local_rank}")
         dist.init_process_group(
             backend=backend,
             timeout=timedelta(minutes=args.distributed_timeout_minutes),
+            device_id=device_id,
         )
         init_gloo_group()
 
