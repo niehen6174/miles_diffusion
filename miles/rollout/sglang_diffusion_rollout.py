@@ -365,7 +365,7 @@ async def generate_rollout_async(
 
 EVAL_PROMPT_DATASET = {}
 
-
+# eval only
 async def eval_rollout(args: Namespace, rollout_id: int) -> tuple[dict[str, dict[str, list[Any]]], list[list[Sample]]]:
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
@@ -393,22 +393,16 @@ async def eval_rollout_single_dataset(
 
     global EVAL_PROMPT_DATASET
 
-    cache_key = dataset_config.cache_key + (args.hf_checkpoint, args.apply_chat_template)
+    cache_key = dataset_config.cache_key + (args.hf_checkpoint,)
     if cache_key not in EVAL_PROMPT_DATASET:
-        tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
-        processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
         EVAL_PROMPT_DATASET[cache_key] = Dataset(
             path=dataset_config.path,
-            tokenizer=tokenizer,
-            processor=processor,
             max_length=args.eval_max_prompt_len,
             prompt_key=dataset_config.input_key,
             label_key=dataset_config.label_key,
             multimodal_keys=args.multimodal_keys,
             metadata_key=dataset_config.metadata_key,
             tool_key=dataset_config.tool_key,
-            apply_chat_template=args.apply_chat_template,
-            apply_chat_template_kwargs=args.apply_chat_template_kwargs,
         )
     dataset = EVAL_PROMPT_DATASET[cache_key]
 
