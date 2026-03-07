@@ -308,6 +308,7 @@ class SGLangDiffusionEngine(RayActor):
 
     def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
         # SGL-D TODO: Support weights update group for in-memory weight update
+        raise NotImplementedError("init_weights_update_group is not implemented in SGL-D yet")
         return self._make_request(
             "init_weights_update_group",
             {
@@ -321,6 +322,7 @@ class SGLangDiffusionEngine(RayActor):
         )
 
     def destroy_weights_update_group(self, group_name):
+        raise NotImplementedError("destroy_weights_update_group is not implemented in SGL-D yet")
         # SGL-D TODO: Support weights update group for in-memory weight update
         try:
             return self._make_request(
