@@ -1,4 +1,4 @@
-from sglang.srt.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from miles.utils.http_utils import _wrap_ipv6
 
 
@@ -26,7 +26,6 @@ def add_sglang_diffusion_arguments(parser):
         # memory
         "enable_memory_saver",
         # distributed
-        "tp_size",
         "port",
         "nnodes",
         "node_rank",
@@ -94,7 +93,7 @@ def add_sglang_diffusion_arguments(parser):
 
 
 def validate_args(args):
-    args.sglang_tp_size = args.rollout_num_gpus_per_engine
+    args.sglang_tp_size = args.sglang_tp_size
     args.sglang_sp_size = 1 if args.sglang_sp_degree is None else args.sglang_sp_degree
     args.sglang_cfgp_size = 2 if args.sglang_enable_cfg_parallel else 1
 

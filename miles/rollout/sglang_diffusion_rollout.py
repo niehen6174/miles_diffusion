@@ -43,7 +43,8 @@ class GenerateState(metaclass=SingletonMeta):
             args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
         )
         self.sampling_params: dict[str, Any] = dict(
-            # Diffusion sampling params
+            # TODO: Diffusion sampling params
+            rollout=True,
 
             # temperature=args.rollout_temperature,
             # top_p=args.rollout_top_p,
@@ -107,14 +108,6 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     # assert (
     #     sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
     # ), f"Sample status is {sample.status}"
-
-    assert (
-        sampling_params["max_new_tokens"] >= 0
-    ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
-
-    if sampling_params["max_new_tokens"] == 0:
-        sample.status = Sample.Status.TRUNCATED
-        return sample
 
     #####################################
     # Prepare payload for sglang server #
@@ -237,37 +230,13 @@ async def generate_and_rm_group(
 
 
 async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
-    aborted_samples = []
-
-    state = GenerateState(args)
-    assert not state.aborted
-    state.aborted = True
-
-    assert args.use_miles_router == True, "Now only support miles router for diffusion rollout, please set --use_miles_router True"
-
-    response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
-    urls = response["urls"]
-
-    logger.info(f"Abort request for {urls}")
-    # TODO: check if sgl-d support abort request
-    await asyncio.gather(*[post(f"{url}/abort_request", {"abort_all": True}) for url in urls])
-
-    # make sure all the pending tasks are finished
-    count = 0
-    while state.pendings:
-        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
-
-        for task in done:
-            group = task.result()
-            aborted_samples.append(group)
-            count += len(group)
-
-    return aborted_samples
+    # SGL-D TODO: support abort
+    raise NotImplementedError("SGLang-Diffusion doesn't support abort")
 
 
 async def generate_rollout_async(
     args: Namespace, rollout_id: int, data_source: Callable[[int], list[list[Sample]]]
-) -> tuple[RolloutFnTrainOutput, list[list[Sample]]]:
+) -> RolloutFnTrainOutput:
     """An example to implement the generate_rollout function for an rule based rm rollout generation.
 
     Args:
@@ -360,7 +329,7 @@ async def generate_rollout_async(
         process_func = load_function(args.rollout_all_samples_process_path)
         process_func(args, all_samples, data_source)
 
-    return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect()), aborted_samples
+    return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect())
 
 
 EVAL_PROMPT_DATASET = {}
@@ -407,15 +376,17 @@ async def eval_rollout_single_dataset(
     dataset = EVAL_PROMPT_DATASET[cache_key]
 
     base_sampling_params = dict(
-        temperature=dataset_config.temperature,
-        top_p=dataset_config.top_p,
-        top_k=dataset_config.top_k,
-        max_new_tokens=dataset_config.max_response_len,
-        stop=args.rollout_stop,
-        stop_token_ids=args.rollout_stop_token_ids,
-        skip_special_tokens=args.rollout_skip_special_tokens,
-        no_stop_trim=True,
-        spaces_between_special_tokens=False,
+        # TODO: base sampling params
+
+        # temperature=dataset_config.temperature,
+        # top_p=dataset_config.top_p,
+        # top_k=dataset_config.top_k,
+        # max_new_tokens=dataset_config.max_response_len,
+        # stop=args.rollout_stop,
+        # stop_token_ids=args.rollout_stop_token_ids,
+        # skip_special_tokens=args.rollout_skip_special_tokens,
+        # no_stop_trim=True,
+        # spaces_between_special_tokens=False,
     )
 
     tasks = []
@@ -493,6 +464,6 @@ def generate_rollout(
         output, _ = run(eval_rollout(args, rollout_id))
         return output
 
-    output, aborted_samples = run(generate_rollout_async(args, rollout_id, data_source.get_samples))
-    data_source.add_samples(aborted_samples)
+    output = run(generate_rollout_async(args, rollout_id, data_source.get_samples))
+    # data_source.add_samples(aborted_samples)
     return output

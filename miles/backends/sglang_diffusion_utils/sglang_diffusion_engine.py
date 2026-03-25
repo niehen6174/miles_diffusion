@@ -9,8 +9,8 @@ from urllib.parse import quote
 import requests
 import sglang_router
 from packaging.version import parse
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import kill_process_tree
+from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.launch_server import kill_process_tree
 from urllib3.exceptions import NewConnectionError
 
 from miles.ray.ray_actor import RayActor
@@ -100,6 +100,22 @@ class SGLangDiffusionEngine(RayActor):
         # remove PD Disaggregation
         self.base_gpu_id = base_gpu_id
 
+    def compute_reward(self, rm_type: str, response: str, prompt: str) -> float:
+        """Compute a reward on the engine's GPU.
+
+        Called via ``.remote()`` from ``RolloutManager``.  Reward models are
+        loaded lazily on the first request and reused afterwards.
+        """
+        if not hasattr(self, "_reward_models"):
+            self._reward_models = {}
+        if rm_type == "ocr":
+            if "ocr" not in self._reward_models:
+                from miles.rollout.rm_hub.ocr import create_ocr_scorer
+
+                self._reward_models["ocr"] = create_ocr_scorer(use_gpu=True)
+            return self._reward_models["ocr"](response, prompt)
+        raise NotImplementedError(f"Reward type '{rm_type}' is not supported on engine")
+
     def init(self, dist_init_addr, port, nccl_port, host=None, disaggregation_bootstrap_port=None):
         self.router_ip = self.args.sglang_router_ip
         self.router_port = self.args.sglang_router_port
@@ -145,31 +161,19 @@ class SGLangDiffusionEngine(RayActor):
     def _init_external(self, expect_server_args, external_engine_need_check_fields):
         logger.info(f"Use external SGLang-Diffusion engine (rank={self.rank}, expect_server_args={expect_server_args})")
 
-        # TODO: miles diffusion support sanity check
+        # TODO: miles diffusion support server args sanity check
+        # Now only do healthy check for generate
         # SGL-D TODO: SGLang-D support get actual server args
         # def _get_actual_server_args():
         #     response = requests.get(f"http://{self.server_host}:{self.server_port}/get_server_info")
         #     response.raise_for_status()
         #     return response.json()
 
-        def _sanity_check_server_args(actual_server_args, expect_server_args):
-            for name in external_engine_need_check_fields:
-                expect_value = expect_server_args.get(name)
-                actual_value = actual_server_args.get(name)
-                assert (
-                    actual_value == expect_value
-                ), f"{name=} {expect_value=} {actual_value=} {expect_server_args=} {actual_server_args=}"
-
         _wait_server_healthy(
             base_url=f"http://{self.server_host}:{self.server_port}",
             api_key=None,
             is_process_alive=lambda: True,
         )
-
-        # TODO: miles diffusion support sanity check
-        # SGL-D TODO: SGLang-D support get actual server args
-        # actual_server_args = _get_actual_server_args()
-        # _sanity_check_server_args(actual_server_args, expect_server_args)
 
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
@@ -268,7 +272,7 @@ class SGLangDiffusionEngine(RayActor):
             response = None
             if self.args.use_miles_router:
                 response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url=http://{self.server_host}:{self.server_port}"
+                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url={worker_url}"
                 )
             else:
                 # SGL-D router TODO: shutdown for sglang-diffusion router
@@ -338,6 +342,8 @@ class SGLangDiffusionEngine(RayActor):
     def update_weights_from_distributed(
         self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
     ):
+        raise NotImplementedError("destroy_weights_update_group is not implemented in SGL-D yet")
+        # SGL-D TODO: Support weights update group for in-memory weight update
         payload = {
             "names": names,
             "dtypes": [str(dtype).replace("torch.", "") for dtype in dtypes],
@@ -352,68 +358,16 @@ class SGLangDiffusionEngine(RayActor):
             payload,
         )
 
-    def pause_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={})
-        response.raise_for_status()
-        return response
+    # SGL-D TODO: support pause/continue generation for async
+    # def pause_generation(self):
+    #     response = requests.post(f"http://{self.server_host}:{self.server_port}/pause_generation", json={})
+    #     response.raise_for_status()
+    #     return response
 
-    def continue_generation(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/continue_generation", json={})
-        response.raise_for_status()
-        return response
-
-    def post_process_weights(
-        self,
-        restore_weights_before_load: bool = False,
-        post_process_quantization: bool = False,
-    ):
-        """
-        Update model weights from tensor data. The HTTP server will only post meta data, and the real weights will be copied directly from GPUs.
-        Note: The model should be on GPUs rather than CPU for this functionality to work properly.
-        If you encounter issues, ensure your model is loaded on GPU devices rather than CPU.
-        """
-
-        return self._make_request(
-            "post_process_weights",
-            {
-                "restore_weights_before_load": restore_weights_before_load,
-                "post_process_quantization": post_process_quantization,
-            },
-        )
-
-    def start_profile(
-        self,
-        # The output directory
-        output_dir: str | None = None,
-        # If set, it profile as many as this number of steps.
-        # If it is set, profiling is automatically stopped after this step, and
-        # the caller doesn't need to run stop_profile.
-        start_step: int | None = None,
-        num_steps: int | None = None,
-        activities: list[str] | None = None,
-        profile_by_stage: bool = False,
-        with_stack: bool | None = None,
-        record_shapes: bool | None = None,
-    ):
-        response = requests.post(
-            f"http://{self.server_host}:{self.server_port}/start_profile",
-            json={
-                "output_dir": output_dir,
-                "start_step": start_step,
-                "num_steps": num_steps,
-                "activities": activities,
-                "profile_by_stage": profile_by_stage,
-                "with_stack": with_stack,
-                "record_shapes": record_shapes,
-            },
-        )
-        response.raise_for_status()
-        return response
-
-    def stop_profile(self):
-        response = requests.post(f"http://{self.server_host}:{self.server_port}/stop_profile", json={})
-        response.raise_for_status()
-        return response
+    # def continue_generation(self):
+    #     response = requests.post(f"http://{self.server_host}:{self.server_port}/continue_generation", json={})
+    #     response.raise_for_status()
+    #     return response
 
     def simulate_crash(self):
         if self.args.rollout_external or not getattr(self, "process", None):
@@ -469,8 +423,6 @@ def _compute_server_args(
         "enable_draft_weights_cpu_backup": True,
     }
 
-    # remove PD disagg
-
     if args.fp16:
         kwargs["dtype"] = "float16"
     external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
@@ -483,7 +435,7 @@ def _compute_server_args(
 
     # for compatibility with old args
     if len(unused_keys) > 0:
-        logger.info(f"Warning: The following arguments is not supported in the current sglang: {unused_keys}.")
+        logger.info(f"Warning: The following arguments is not supported in the current sglang-diffusion: {unused_keys}.")
         for key in unused_keys:
             kwargs.pop(key)
 
@@ -491,12 +443,4 @@ def _compute_server_args(
 
 
 _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS = [
-    "model_path",
-    "trust_remote_code",
-    "random_seed",
-    "nccl_port",
-    "dist_init_addr",
-    "skip_server_warmup",
-    "enable_draft_weights_cpu_backup",
-    "mem_fraction_static",
 ]

@@ -13,7 +13,6 @@ import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
-from miles.backends.sglang_utils.sglang_engine import SGLangEngine
 from miles.backends.sglang_diffusion_utils.sglang_diffusion_engine import SGLangDiffusionEngine
 from miles.rollout.base_types import call_rollout_fn
 from miles.utils import tracking_utils
@@ -84,6 +83,14 @@ class RolloutManager:
         self.nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         self.rollout_engine_lock = Lock.options(num_cpus=1, num_gpus=0).remote()
         self.rollout_id = -1
+
+        # Expose engine handles so that async_rm can dispatch GPU-heavy reward
+        # computation (e.g. OCR) to the rollout engines instead of running
+        # locally on the CPU-only RolloutManager.
+        live_engines = [e for e in self.all_rollout_engines if e is not None]
+        if live_engines:
+            args._reward_engines = live_engines
+            logger.info("Registered %d rollout engines as reward workers", len(live_engines))
 
         self._metric_checker = MetricChecker.maybe_create(args)
         self._health_monitor = None
@@ -722,23 +729,8 @@ def _start_router(args):
         from miles.router.router import run_router
 
         router_args = args
-
-    else:
-        from sglang_router.launch_router import RouterArgs
-
-        from miles.utils.http_utils import run_router
-
-        router_args = RouterArgs.from_cli_args(args, use_router_prefix=True)
-        router_args.host = args.sglang_router_ip
-        router_args.port = args.sglang_router_port
-        router_args.prometheus_port = find_available_port(random.randint(4000, 5000))
-        router_args.log_level = "warn"
-        router_args.request_timeout_secs = args.sglang_router_request_timeout_secs
-
-        if args.prefill_num_servers is not None:
-            router_args.pd_disaggregation = True
-
-        logger.info(f"Launch router with args: {router_args}")
+    else :
+        raise RuntimeError("Miles-diffusion only supports miles router for now")
 
     process = multiprocessing.Process(
         target=run_router,

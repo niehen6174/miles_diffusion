@@ -12,6 +12,7 @@ from .gpqa import compute_gpqa_reward
 from .math_dapo_utils import compute_score as compute_score_dapo
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
+from .ocr import compute_ocr_reward
 
 
 async def remote_rm(args, sample: Sample):
@@ -54,6 +55,8 @@ async def async_rm(args, sample: Sample, **kwargs):
         return f1_score(response, label)[0]
     elif rm_type == "gpqa":
         return compute_gpqa_reward(response, label, metadata=metadata)
+    elif rm_type == "ocr":
+        return await compute_ocr_reward(args, response, str(sample.prompt))
     elif rm_type == "ifbench":
         from .ifbench import compute_ifbench_reward
 
