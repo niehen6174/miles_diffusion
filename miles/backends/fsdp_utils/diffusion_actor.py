@@ -5,6 +5,7 @@ import os
 from argparse import Namespace
 import json
 
+import ray
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -31,6 +32,7 @@ from miles.utils import tracking_utils
 from .actor import apply_fsdp2, move_torch_optimizer
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
+from .update_weight_utils import UpdateWeightFromTensor
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.tensor import DTensor
 
@@ -99,6 +101,11 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
                 device=torch.cuda.current_device(),
             )
 
+        rollout_fn = str(getattr(self.args, "rollout_function_path", ""))
+        self._use_tensor_weight_update = self.args.colocate and "sglang_diffusion_rollout" in rollout_fn
+        if self._use_tensor_weight_update:
+            self.weight_updater = UpdateWeightFromTensor(self.args, self.model)
+
         return int(getattr(self.args, "start_rollout_id", 0))
 
     @timer
@@ -130,11 +137,31 @@ class DiffusionFSDPTrainRayActor(TrainRayActor):
         logger.warning("DiffusionFSDPTrainRayActor save_model is not implemented; skipping checkpoint save.")
 
     def update_weights(self) -> None:  # type: ignore[override]
-        if self.args.colocate and getattr(self.args, "diffusion_train", False):
+        if self.args.debug_train_only or self.args.debug_rollout_only:
+            return
+
+        if self.args.colocate and getattr(self.args, "diffusion_train", False) and not self._use_tensor_weight_update:
             dist.barrier(group=get_gloo_group())
             logger.info("update_weights skipped in colocate diffusion mode (same-process rollout uses latest weights)")
             return
 
+        if self._use_tensor_weight_update:
+            rollout_engines, rollout_engine_lock, num_new_engines = ray.get(
+                self.rollout_manager.get_rollout_engines_and_lock.remote()
+            )
+            if num_new_engines > 0:
+                self.weight_updater.connect_rollout_engines(rollout_engines, rollout_engine_lock)
+                dist.barrier(group=get_gloo_group())
+                if dist.get_rank() == 0:
+                    ray.get(self.rollout_manager.clear_num_new_engines.remote())
+
+            self.weight_updater.update_weights()
+            clear_memory()
+            return
+
+        self._update_weights_via_disk()
+
+    def _update_weights_via_disk(self) -> None:
         # Diffusion rollout uses a local pipeline; sync weights via disk.
         rank = dist.get_rank()
         logger.info("update_weights start (rank=%s)", rank)
