@@ -26,7 +26,7 @@ from miles.utils.misc import load_function
 from miles.utils.ray_utils import Box
 from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.tracking_utils import init_tracking
-from miles.utils.types import Sample, sample_effective_response_length
+from miles.utils.types import Sample
 
 from ..utils.metric_utils import has_repetition
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -152,12 +152,10 @@ class RolloutManager:
         self.rollout_id = rollout_id
         self.health_monitoring_resume()
         logger.info("RolloutManager generate start: rollout_id=%s", rollout_id)
-        if self.use_diffusion_rollout and self.args.colocate and getattr(self.args, "diffusion_train", False):
-            data = self._get_diffusion_prompt_train_data(rollout_id=rollout_id)
-            logger.info("RolloutManager generate done (prompt-only colocate): rollout_id=%s", rollout_id)
-            return self._split_prompt_data_by_dp(data, self.train_parallel_config["dp_size"])
+
         if self.args.ci_test and self.args.use_fault_tolerance and rollout_id >= 2:
             self._try_ci_fault_injection()
+
         data, metrics = self._get_rollout_data(rollout_id=rollout_id)
         self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=False)
         _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
