@@ -141,7 +141,14 @@ async def generate_microgroup(args: Namespace, microgroup: list[Sample], samplin
     output = await post(url, payload)
 
     # Get diffusion response and log probs
-    return [apply_rollout_image_response(sample, response) for sample, response in zip(microgroup, output)]
+    microgroup = [apply_rollout_image_response(sample, response) for sample, response in zip(microgroup, output)]
+
+    # manually set the seed for samples
+    # TODO: get real seeds from SGL-D
+    for idx, sample in enumerate(microgroup):
+        sample.seed = sampling_params["rollout_first_seed"] + idx
+
+    return microgroup
 
 
 async def generate_and_rm_microgroup(
@@ -174,29 +181,13 @@ async def generate_and_rm_microgroup(
 
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
-        return sample
+        return microgroup
 
-    # multi samples
-    if isinstance(sample, list):
-        samples = sample
-        if any([sample.status == Sample.Status.ABORTED for sample in samples]):
-            return samples
-
-        # for multi agent system, the reward of some sample is calculated during generation.
-        samples_need_reward = [sample for sample in samples if sample.reward is None]
-        rewards = await batched_async_rm(args, samples_need_reward)
-        for sample, reward in zip(samples_need_reward, rewards, strict=False):
-            sample.reward = reward
-        return samples
-    else:
-        if sample.status == Sample.Status.ABORTED:
-            return sample
-        # for multi-turn environment, a reward could be assigned to the agent.
-        if sample.reward is None:
-            sample.reward = await async_rm(args, sample)
-
-    return sample
-
+    # calculate the reward for the microgroup
+    rewards = await batched_async_rm(args, microgroup)
+    for sample, reward in zip(microgroup, rewards, strict=True):
+        sample.reward = reward
+    return microgroup
 
 async def generate_and_rm_group(
     args: Namespace, group: list[Sample], sampling_params: dict[str, Any], evaluation: bool = False
@@ -228,7 +219,7 @@ async def generate_and_rm_group(
 
 
 async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
-    # SGL-D TODO: support abort
+    # SGL-D TODO: support oversampling+filter & abort
     raise NotImplementedError("SGLang-Diffusion doesn't support abort")
 
 
