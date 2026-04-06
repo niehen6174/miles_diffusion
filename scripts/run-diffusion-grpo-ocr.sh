@@ -31,7 +31,7 @@ python "${ROOT_DIR}/tools/prepare_ocr_jsonl.py"
 python -u "${ROOT_DIR}/train.py" \
   --train-backend fsdp \
   --diffusion-train \
-  --rollout-function-path miles.rollout.diffusion_rollout.generate_rollout \
+  --rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout \
   --hf-checkpoint gpt2 \
   --prompt-data "${ROOT_DIR}/data/ocr/train.jsonl" \
   --input-key input \
@@ -44,10 +44,10 @@ python -u "${ROOT_DIR}/train.py" \
   --rollout-num-gpus-per-engine 1 \
   --num-gpus-per-node 4 \
   --colocate \
-  --offload-rollout \
   --diffusion-model Qwen/Qwen-Image \
   --diffusion-reward ocr:1.0 \
-  --reward-key avg \
+  --reward-type ocr \
+  --reward-key ocr \
   --diffusion-dtype fp32 \
   --diffusion-num-steps 10 \
   --diffusion-num-batches-per-epoch 8 \
