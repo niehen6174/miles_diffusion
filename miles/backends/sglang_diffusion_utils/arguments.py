@@ -93,11 +93,8 @@ def add_sglang_diffusion_arguments(parser):
 
 
 def validate_args(args):
-    args.sglang_tp_size = args.sglang_tp_size
-    args.sglang_sp_size = 1 if args.sglang_sp_degree is None else args.sglang_sp_degree
-    args.sglang_cfgp_size = 2 if args.sglang_enable_cfg_parallel else 1
-
-    # dp_size doesn't exist in diffusion ServerArgs; default to 1.
+    # `sglang_dp_size` is used by rollout port allocation; default to 1 if
+    # SGL-D's ServerArgs didn't register the CLI arg in this build.
     if not hasattr(args, "sglang_dp_size"):
         args.sglang_dp_size = 1
 

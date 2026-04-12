@@ -45,7 +45,7 @@ class DenoisingEnv:
 
 @dataclass
 class DiTTrajectory:
-    latent_model_inputs: torch.Tensor | None = None
+    latents: torch.Tensor | None = None
     timesteps: torch.Tensor | None = None
 
 

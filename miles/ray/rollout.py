@@ -543,11 +543,6 @@ def init_rollout_engines(args, pg, all_rollout_engines):
     num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
     num_engines = args.rollout_num_gpus // num_gpu_per_engine
     assert len(all_rollout_engines) == num_engines
-    # if args.prefill_num_servers is not None:
-    #     prefill_num_servers = args.prefill_num_servers * args.rollout_num_gpus_per_engine // num_gpu_per_engine
-    #     assert (
-    #         num_engines > prefill_num_servers
-    #     ), f"num_engines {num_engines} should be larger than prefill_num_servers {prefill_num_servers}"
 
     pg, reordered_bundle_indices, reordered_gpu_ids = pg
     print(f"[DEBUG] init_rollout_engines: reordered_bundle_indices={reordered_bundle_indices}, reordered_gpu_ids={reordered_gpu_ids}", flush=True)
@@ -584,13 +579,6 @@ def init_rollout_engines(args, pg, all_rollout_engines):
             "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
         }
 
-        worker_type = "regular"
-        if args.prefill_num_servers is not None:
-            if i < prefill_num_servers:
-                worker_type = "prefill"
-            else:
-                worker_type = "decode"
-
         rollout_engine = RolloutRayActor.options(
             num_cpus=num_cpus,
             num_gpus=num_gpus,
@@ -598,7 +586,7 @@ def init_rollout_engines(args, pg, all_rollout_engines):
             runtime_env={
                 "env_vars": env_vars,
             },
-        ).remote(args, rank=i, worker_type=worker_type, base_gpu_id=base_gpu_id)
+        ).remote(args, rank=i, base_gpu_id=base_gpu_id)
 
         rollout_engines.append((i, rollout_engine))
         all_rollout_engines[i] = rollout_engine
@@ -651,12 +639,6 @@ def _allocate_rollout_engine_addr_and_ports_normal(*, args, num_engines, rollout
     )
     addr_and_ports = [{} for _ in range(num_engines)]
 
-    # Calculate prefill limit to identify prefill engines
-    prefill_limit = 0
-    if args.prefill_num_servers is not None:
-        num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
-        prefill_limit = args.prefill_num_servers * args.rollout_num_gpus_per_engine // num_gpu_per_engine
-
     visited_nodes = set()
     for rank, engine in rollout_engines:
         if rank // num_engines_per_node in visited_nodes:
@@ -695,9 +677,6 @@ def _allocate_rollout_engine_addr_and_ports_normal(*, args, num_engines, rollout
             addr_and_ports[current_rank]["host"] = get_addr()
             addr_and_ports[current_rank]["port"] = get_port()
             addr_and_ports[current_rank]["nccl_port"] = get_port()
-
-            if args.prefill_num_servers is not None and current_rank < prefill_limit:
-                addr_and_ports[current_rank]["disaggregation_bootstrap_port"] = get_port()
 
         if args.rollout_num_gpus_per_engine > args.num_gpus_per_node:
             num_node_per_engine = args.rollout_num_gpus_per_engine // args.num_gpus_per_node
