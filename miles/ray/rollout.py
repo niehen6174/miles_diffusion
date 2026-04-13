@@ -328,31 +328,37 @@ class RolloutManager:
             torch.save(dict(rollout_id=rollout_id, **dump_data), path)
 
     def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
+        # list[list[Sample]] is for custom reward post process function
         if self.custom_reward_post_process_func is not None:
             return self.custom_reward_post_process_func(self.args, samples)
 
         raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
-        if (
-            self.args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
-            and self.args.rewards_normalization
-        ):
-            # group norm
-            rewards = torch.tensor(raw_rewards, dtype=torch.float)
+        if not self.args.rewards_normalization:
+            return raw_rewards, raw_rewards
+
+        rewards = torch.tensor(raw_rewards, dtype=torch.float)
+
+        if self.args.globalize_reward_norm:
+            # global norm: batch-wide mean and std (as in flow GRPO)
+            mean = rewards.mean()
+            rewards = rewards - mean
+            if self.args.grpo_std_normalization:
+                std = rewards.std()
+                rewards = rewards / (std + 1e-4)
+        else:
+            # group norm: per-prompt mean and per-group std
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
             else:
-                # when samples count are not equal in each group
                 rewards = rewards.view(-1, rewards.shape[-1])
             mean = rewards.mean(dim=-1, keepdim=True)
             rewards = rewards - mean
 
-            if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
+            if self.args.grpo_std_normalization:
                 std = rewards.std(dim=-1, keepdim=True)
                 rewards = rewards / (std + 1e-6)
 
-            return raw_rewards, rewards.flatten().tolist()
-
-        return raw_rewards, raw_rewards
+        return raw_rewards, rewards.flatten().tolist()
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """
@@ -366,75 +372,29 @@ class RolloutManager:
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
 
+        raw_t = torch.tensor(raw_rewards, dtype=torch.float)
+        norm_t = torch.tensor(rewards, dtype=torch.float)
+        print(
+            f"[reward stats] raw mean={raw_t.mean():.4f} std={raw_t.std():.4f} min={raw_t.min():.4f} max={raw_t.max():.4f} | "
+            f"normalized mean={norm_t.mean():.4f} std={norm_t.std():.4f} min={norm_t.min():.4f} max={norm_t.max():.4f}",
+            flush=True,
+        )
+
         train_data = {
-            "tokens": [getattr(sample, "tokens", []) for sample in samples],
-            "response_lengths": [int(getattr(sample, "response_length", 0)) for sample in samples],
-            # some reward model, e.g. remote rm, may return multiple rewards,
-            # we could use key to select the reward.
+            # RL
             "rewards": rewards,
             "raw_reward": raw_rewards,
+            "rollout_log_probs": [sample.rollout_log_probs for sample in samples],
+            # Rollout outputs — training side maps these to model-specific forward() args
+            "denoising_env": [sample.denoising_env for sample in samples],
+            "dit_trajectory": [sample.dit_trajectory for sample in samples],
+            # Bookkeeping
             "sample_indices": [sample.index for sample in samples],
+            "prompt": [sample.prompt for sample in samples],
         }
-        if any(getattr(sample, "reward", None) is None for sample in samples):
-            raise ValueError("Missing reward in rollout samples.")
-        train_data["reward_ocr"] = [
-            sample.reward["ocr"] if isinstance(sample.reward, dict) else float(sample.reward)
-            for sample in samples
-        ]
-        if train_data["reward_ocr"]:
-            reward_ocr = train_data["reward_ocr"]
-            zero_ratio = float(np.mean([1.0 if r == 0.0 else 0.0 for r in reward_ocr]))
-            logger.info(
-                "rollout reward_ocr stats: n=%d min=%.6f max=%.6f zero_ratio=%.6f",
-                len(reward_ocr),
-                float(min(reward_ocr)),
-                float(max(reward_ocr)),
-                zero_ratio,
-            )
-        # Pass prompt text for diffusion training to recompute embeddings.
-        train_data["prompt"] = [sample.prompt for sample in samples]
 
-        # loss mask
-        # TODO: compress the loss mask
-        loss_masks = []
-        for sample in samples:
-            rl = int(getattr(sample, "response_length", 0))
-            lm = getattr(sample, "loss_mask", None)
-            if lm is None:
-                lm = [1] * rl
-                sample.loss_mask = lm
-            assert len(lm) == rl, f"loss mask length {len(lm)} != response length {rl}"
-            if getattr(sample, "remove_sample", False):
-                lm = [0] * rl
-                sample.loss_mask = lm
-            loss_masks.append(sample.loss_mask)
-        train_data["loss_masks"] = loss_masks
-
-        # overwriting the raw reward
-        if samples[0].metadata and "raw_reward" in samples[0].metadata:
-            train_data["raw_reward"] = [sample.metadata["raw_reward"] for sample in samples]
-
-        # For rollout buffer
-        if samples[0].metadata and "round_number" in samples[0].metadata:
-            train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
-
-        # Add rollout log probabilities for off-policy correction
-        if samples[0].rollout_log_probs is not None:
-            train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
-
-        if samples[0].rollout_routed_experts is not None:
-            train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
-
-        if samples[0].train_metadata is not None:
-            train_data["metadata"] = [sample.train_metadata for sample in samples]
-
-        if getattr(samples[0], "multimodal_train_inputs", None) is not None:
-            train_data["multimodal_train_inputs"] = [
-                getattr(sample, "multimodal_train_inputs", None) for sample in samples
-            ]
-
-        if "teacher_log_probs" in samples[0].__dict__:
-            train_data["teacher_log_probs"] = [sample.teacher_log_probs for sample in samples]
+        if hasattr(self, "_dynamic_global_batch_size"):
+            train_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
 
         return train_data
 
@@ -443,55 +403,23 @@ class RolloutManager:
 
     def _split_train_data_by_dp(self, data, dp_size):
         """Split the train data by data parallel size."""
-        rollout_data = {}
+        num_samples = len(data["sample_indices"])
+        partitions = [range(i, num_samples, dp_size) for i in range(dp_size)]
 
-        if "prompt" in data:
-            rollout_data["prompt"] = data["prompt"]
-
-        total_lengths = [len(t) for t in data["tokens"]]
-        data["total_lengths"] = total_lengths
-
-        if self.args.balance_data:
-            partitions = get_seqlen_balanced_partitions(total_lengths, dp_size, equal_size=True)
-        else:
-            partitions = [range(i, len(total_lengths), dp_size) for i in range(dp_size)]
+        # Keys to partition (per-sample lists)
+        partition_keys = [k for k in data if isinstance(data[k], list) and len(data[k]) == num_samples]
+        # Keys to broadcast (global, not per-sample)
+        broadcast_keys = [k for k in data if k not in partition_keys and k != "dynamic_global_batch_size"]
 
         rollout_data_refs = []
-
         for i in range(dp_size):
             rollout_data = {}
             partition = partitions[i]
             rollout_data["partition"] = partition
-            for key in [
-                "tokens",
-                "multimodal_train_inputs",
-                "response_lengths",
-                "rewards",
-                "truncated",
-                "loss_masks",
-                "round_number",
-                "sample_indices",
-                "rollout_log_probs",
-                "rollout_routed_experts",
-                "prompt",
-                # Propagate rollout metadata (e.g., diffusion trajectories) to training.
-                "metadata",
-                "teacher_log_probs",
-            ]:
-                if key not in data:
-                    continue
-                val = [data[key][j] for j in partition]
-                rollout_data[key] = val
-            # keys that need to be splited at train side
-            for key in [
-                "raw_reward",
-                "total_lengths",
-                "reward_ocr",
-            ]:
-                if key not in data:
-                    continue
+            for key in partition_keys:
+                rollout_data[key] = [data[key][j] for j in partition]
+            for key in broadcast_keys:
                 rollout_data[key] = data[key]
-            # Pass dynamic global_batch_size to training side
             if hasattr(self, "_dynamic_global_batch_size"):
                 rollout_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
             rollout_data_refs.append(Box(ray.put(rollout_data)))

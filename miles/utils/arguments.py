@@ -986,11 +986,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 choices=[
                     "grpo",
-                    "gspo",
-                    "reinforce_plus_plus",
-                    "reinforce_plus_plus_baseline",
-                    "ppo",
-                    "on_policy_distillation",
                 ],
                 default="grpo",
             )
@@ -1040,6 +1035,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_false",
                 dest="rewards_normalization",
                 help="Disable rewards normalization",
+            )
+            parser.add_argument(
+                "--globalize-reward-norm",
+                action="store_true",
+                default=False,
+                help="Use batch-wide mean/std instead of per-group mean/std for reward normalization (as in flow GRPO).",
             )
             parser.add_argument(
                 "--use-rollout-entropy",

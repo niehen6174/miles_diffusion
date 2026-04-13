@@ -46,7 +46,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --hf-checkpoint gpt2 \
   --prompt-data "${ROOT_DIR}/data/ocr/train.jsonl" \
   --input-key input \
-  --rollout-batch-size 32 \
+  --rollout-batch-size 8 \
   --n-samples-per-prompt 8 \
   --num-rollout 100000 \
   --diffusion-train-batch-size 2 \
@@ -60,6 +60,8 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --sglang-server-concurrency 4 \
   --diffusion-model Qwen/Qwen-Image \
   --diffusion-reward ocr:1.0 \
+  --advantage-estimator grpo \
+  --globalize-reward-norm \
   --rm-type ocr \
   --diffusion-dtype fp32 \
   --diffusion-num-steps 10 \
@@ -68,5 +70,5 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --diffusion-rollout-noise-level 0.7 \
   --diffusion-height 512 \
   --diffusion-width 512 \
-  --global-batch-size 128 \
+  --global-batch-size 64 \
   "${WANDB_ARGS[@]}"

@@ -139,25 +139,13 @@ class MilesRouter:
 
         try:
             response = await self.client.request(request.method, url, content=body, headers=headers)
-            # Eagerly read content so we can return JSON (not streaming)
+            # Pass through raw bytes — JSON re-serialization is too expensive for large tensor payloads.
             content = await response.aread()
-            content_type = response.headers.get("content-type", "")
-            try:
-                # Prefer parsing JSON if possible
-                data = json.loads(content)
-                return JSONResponse(
-                    content=data,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                )
-            except Exception:
-                # Fall back to raw body with original content type
-                return Response(
-                    content=content,
-                    status_code=response.status_code,
-                    headers=dict(response.headers),
-                    media_type=content_type or None,
-                )
+            return Response(
+                content=content,
+                status_code=response.status_code,
+                headers=dict(response.headers),
+            )
 
         finally:
             self._finish_url(worker_url)
