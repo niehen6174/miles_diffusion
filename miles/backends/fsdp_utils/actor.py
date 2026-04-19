@@ -460,7 +460,12 @@ class FSDPTrainRayActor(TrainRayActor):
                         loss.backward()
 
                     with torch.no_grad():
+                        per_elem = torch.maximum(unclipped, clipped)
                         log_stats["loss"].append(loss.detach())
+                        # Diagnostic: abs-mean shows raw loss magnitude before sign cancellation
+                        log_stats["loss_abs_mean"].append(per_elem.abs().mean().detach())
+                        log_stats["adv_abs_mean"].append(adv_chunk.abs().mean().detach())
+                        log_stats["ratio_abs_minus_1"].append((ratio - 1.0).abs().mean().detach())
                         log_stats["approx_kl"].append(
                             0.5 * torch.mean((log_prob_new - old_chunk) ** 2).detach()
                         )
