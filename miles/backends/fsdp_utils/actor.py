@@ -218,15 +218,15 @@ class FSDPTrainRayActor(TrainRayActor):
             reduced = {k: sum(d[k] for d in gathered) / dp_size for k in log_dict}
             reduced["epoch"] = float(rollout_id)
             reduced["rollout/step"] = compute_rollout_step(self.args, rollout_id)
-            reduced["global_step"] = float(step)
             # wandb.define_metric("train/*", step_metric="train/step") pulls the
-            # x-axis value from this key; keep it == global_step for monotonicity.
+            # x-axis value from this key; ``train/step`` subsumes what we used
+            # to also log as a separate ``global_step`` metric.
             reduced["train/step"] = float(step)
-            tracking_utils.log(self.args, reduced, step_key="global_step")
+            tracking_utils.log(self.args, reduced, step_key="train/step")
             # Stdout mirror so we can spot misalignment / divergence without wandb.
             print(
                 f"[train step {int(step)}] rollout={rollout_id} "
-                + " ".join(f"{k}={v:.4f}" for k, v in sorted(reduced.items()) if k not in ("epoch", "rollout/step", "global_step")),
+                + " ".join(f"{k}={v:.4f}" for k, v in sorted(reduced.items()) if k not in ("epoch", "rollout/step", "train/step")),
                 flush=True,
             )
         else:
