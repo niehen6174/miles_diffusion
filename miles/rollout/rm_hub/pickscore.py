@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Sequence
 
 import numpy as np
@@ -88,12 +87,6 @@ class PickScoreRewardActor:
         if use_cuda:
             torch.cuda.set_device(0)
         device = "cuda" if use_cuda else "cpu"
-        logger.info(
-            "Initializing PickScore actor on device=%s ray_gpu_ids=%s CUDA_VISIBLE_DEVICES=%s",
-            device,
-            gpu_ids,
-            os.environ.get("CUDA_VISIBLE_DEVICES"),
-        )
         self.scorer = PickScoreScorer(
             device=device,
             processor_path=processor_path,

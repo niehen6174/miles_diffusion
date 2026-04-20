@@ -46,12 +46,14 @@ fi
   --no-offload-rollout \
   --use-lora \
   --lora-rank 64 \
+  --lora-alpha 128 \
+  --diffusion-init-lora-weight gaussian \
   --use-miles-router \
   --sglang-server-concurrency 2 \
   --diffusion-model Qwen/Qwen-Image \
   --diffusion-reward pickscore:1.0 \
   --advantage-estimator grpo \
-  --globalize-reward-norm \
+  --globalize-reward-std \
   --rm-type pickscore \
   --pickscore-num-workers 1 \
   --pickscore-num-gpus-per-worker 1.0 \
@@ -60,14 +62,16 @@ fi
   --pickscore-model-path yuvalkirstain/PickScore_v1 \
   --diffusion-dtype bf16 \
   --diffusion-num-steps 10 \
-  --diffusion-num-batches-per-epoch 1 \
   --diffusion-guidance-scale 4.0 \
   --diffusion-true-cfg-scale 4.0 \
-  --diffusion-rollout-noise-level 0.7 \
+  --diffusion-noise-level 1.2 \
+  --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
+  --diffusion-sde-window-size 2 \
+  --diffusion-sde-window-range 0,5 \
   --diffusion-height 256 \
   --diffusion-width 256 \
   --global-batch-size 2 \
   --diffusion-ignore-last 1 \
-  --diffusion-rollout-debug-mode \
+  --diffusion-debug-mode \
   --debug-skip-optimizer-step \
   "${WANDB_ARGS[@]}"
