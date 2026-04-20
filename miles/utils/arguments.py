@@ -1306,6 +1306,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--lora-alpha", type=int, default=64)
             parser.add_argument("--lora-target-modules", type=str, nargs="+", default=None,
                 help="Override LoRA target modules. Default: per-model from TrainPipelineConfig.")
+            parser.add_argument(
+                "--diffusion-init-lora-weight",
+                type=str,
+                default="gaussian",
+                help=(
+                    "PEFT LoraConfig.init_lora_weights. flow_grpo's Qwen-Image uses 'gaussian' "
+                    "(N(0, 1/r) for lora_A, 0 for lora_B). 'kaiming-uniform' maps to PEFT's "
+                    "default Kaiming-uniform init. Other PEFT schemes ('olora', 'pissa', "
+                    "'pissa_niter_N', 'loftq', ...) pass through unchanged."
+                ),
+            )
 
             parser.add_argument(
                 "--save-debug-train-data",

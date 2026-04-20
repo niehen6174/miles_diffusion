@@ -79,10 +79,17 @@ class FSDPTrainRayActor(TrainRayActor):
             from peft import LoraConfig, get_peft_model
 
             targets = getattr(args, "lora_target_modules", None) or self.train_pipeline_config.lora_target_modules
+            init = getattr(args, "diffusion_init_lora_weight", "gaussian")
+            # "kaiming-uniform" is the common name for PEFT's default (passed as `True`).
+            # Everything else is a string PEFT already recognises ("gaussian", "olora",
+            # "pissa", "pissa_niter_N", "loftq", ...).
+            if init == "kaiming-uniform":
+                init = True
             model = get_peft_model(model, LoraConfig(
                 r=getattr(args, "lora_rank", 64),
                 lora_alpha=getattr(args, "lora_alpha", 64),
                 target_modules=targets,
+                init_lora_weights=init,
             ))
             if dist.get_rank() == 0:
                 model.print_trainable_parameters()
