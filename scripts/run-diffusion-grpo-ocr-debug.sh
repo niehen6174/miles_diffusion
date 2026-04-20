@@ -89,7 +89,6 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --rm-type ocr \
   --diffusion-dtype bf16 \
   --diffusion-num-steps 10 \
-  --diffusion-num-batches-per-epoch 1 \
   --diffusion-guidance-scale 4.0 \
   --diffusion-true-cfg-scale 4.0 \
   --diffusion-noise-level 1.2 \

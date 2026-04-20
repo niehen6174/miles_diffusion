@@ -53,7 +53,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --hf-checkpoint gpt2 \
   --prompt-data "${ROOT_DIR}/data/ocr/train.jsonl" \
   --input-key input \
-  --rollout-batch-size 16 \
+  --rollout-batch-size 32 \
   --n-samples-per-prompt 16 \
   --num-rollout 100000 \
   --diffusion-timestep-batch 5 \
@@ -79,7 +79,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --rm-type ocr \
   --diffusion-dtype bf16 \
   --diffusion-num-steps 10 \
-  --diffusion-num-batches-per-epoch 2 \
+  --diffusion-eval-num-steps 50 \
   --diffusion-gradient-accumulation-steps 64 \
   --diffusion-guidance-scale 4.0 \
   --diffusion-true-cfg-scale 4.0 \

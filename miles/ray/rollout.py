@@ -476,29 +476,6 @@ class RolloutManager:
             rollout_data_refs.append(Box(ray.put(rollout_data)))
         return rollout_data_refs
 
-    def _get_diffusion_prompt_train_data(self, rollout_id: int) -> dict[str, Any]:
-        num_batches = getattr(self.args, "diffusion_num_batches_per_epoch", 1)
-        if num_batches is None or num_batches <= 0:
-            num_batches = 1
-        groups = []
-        for _ in range(num_batches):
-            groups.extend(self.data_source.get_samples(self.args.rollout_batch_size))
-        flat = [sample for group in groups for sample in group]
-        prompts = [sample.prompt for sample in flat]
-        sample_indices = [sample.index for sample in flat]
-        total_lengths = [0] * len(flat)
-        logger.info(
-            "diffusion colocate prompt-only rollout_id=%s groups=%s samples=%s",
-            rollout_id,
-            len(groups),
-            len(flat),
-        )
-        return {
-            "prompt": prompts,
-            "sample_indices": sample_indices,
-            "total_lengths": total_lengths,
-        }
-
     def _split_prompt_data_by_dp(self, data: dict[str, Any], dp_size: int):
         total = len(data["prompt"])
         partitions = [range(i, total, dp_size) for i in range(dp_size)]
