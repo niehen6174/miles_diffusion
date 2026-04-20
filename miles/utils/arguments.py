@@ -142,58 +142,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Max absolute value for advantage clipping in diffusion training.",
             )
             parser.add_argument(
-                "--diffusion-grad-accum-steps",
+                "--diffusion-gradient-accumulation-steps",
                 type=int,
                 default=1,
-                help="Gradient accumulation steps for diffusion training (multiplied by num_timesteps).",
-            )
-            parser.add_argument(
-                "--diffusion-disable-per-prompt-stat-tracking",
-                action="store_true",
-                default=False,
-                help="Disable per-prompt advantage normalization for diffusion GRPO.",
-            )
-            parser.add_argument(
-                "--diffusion-global-std",
-                type=int,
-                default=1,
-                help="Use global std for per-prompt normalization (1=true, 0=false).",
-            )
-            parser.add_argument(
-                "--diffusion-beta",
-                type=float,
-                default=0.0,
-                help="KL coefficient for diffusion training (0 disables KL).",
-            )
-            parser.add_argument(
-                "--diffusion-ema",
-                action="store_true",
-                default=False,
-                help="Enable EMA for diffusion transformer parameters.",
-            )
-            parser.add_argument(
-                "--diffusion-ema-decay",
-                type=float,
-                default=0.9,
-                help="EMA decay for diffusion training.",
-            )
-            parser.add_argument(
-                "--diffusion-ema-update-interval",
-                type=int,
-                default=8,
-                help="EMA update interval (in optimizer steps) for diffusion training.",
-            )
-            parser.add_argument(
-                "--diffusion-timestep-fraction",
-                type=float,
-                default=1.0,
-                help="Fraction of diffusion timesteps to train on (e.g. 0.99).",
-            )
-            parser.add_argument(
-                "--diffusion-cfg",
-                action="store_true",
-                default=False,
-                help="Enable classifier-free guidance during diffusion training.",
+                help="Number of trajectories to accumulate per optimizer step (matches flow_grpo train.gradient_accumulation_steps).",
             )
             parser.add_argument(
                 "--qkv-format",
@@ -343,10 +295,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Guidance scale for diffusion rollout.",
             )
             parser.add_argument(
-                "--diffusion-rollout-noise-level",
+                "--diffusion-noise-level",
                 type=float,
                 default=0.7,
-                help="Noise level for diffusion rollout (rollout_noise_level on POST /rollout/generate).",
+                help="SDE noise level for diffusion rollout (matches flow_grpo sample.noise_level; sent as rollout_noise_level on POST /rollout/generate).",
             )
             parser.add_argument(
                 "--diffusion-height",
@@ -373,25 +325,46 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Optional true_cfg_scale for sglang-diffusion POST /rollout/generate.",
             )
             parser.add_argument(
-                "--diffusion-rollout-generator-device",
+                "--diffusion-generator-device",
                 type=str,
                 default="cuda",
                 help="generator_device field for POST /rollout/generate.",
             )
             parser.add_argument(
-                "--diffusion-rollout-sde-type",
+                "--diffusion-sde-type",
                 type=str,
                 default="sde",
                 help="rollout_sde_type for POST /rollout/generate.",
             )
             parser.add_argument(
-                "--diffusion-rollout-log-prob-no-const",
+                "--diffusion-sde-window-size",
+                type=int,
+                default=0,
+                help="flow_grpo-style random SDE window; 0 disables. Steps outside "
+                     "the window run ODE and are not returned for training.",
+            )
+            parser.add_argument(
+                "--diffusion-sde-window-range",
+                type=str,
+                default=None,
+                help="'lo,hi' bounds for the SDE window start (inclusive, exclusive). "
+                     "Defaults to [0, num_inference_steps].",
+            )
+            parser.add_argument(
+                "--diffusion-step-strategy-path",
+                type=str,
+                default=None,
+                help="Dotted path to a factory(args) -> StepStrategy callable. "
+                     "Overrides --diffusion-sde-window-size.",
+            )
+            parser.add_argument(
+                "--diffusion-log-prob-no-const",
                 action="store_true",
                 default=False,
                 help="Set rollout_log_prob_no_const=true on POST /rollout/generate.",
             )
             parser.add_argument(
-                "--diffusion-rollout-debug-mode",
+                "--diffusion-debug-mode",
                 action="store_true",
                 default=False,
                 help="Set rollout_debug_mode=true on POST /rollout/generate.",
