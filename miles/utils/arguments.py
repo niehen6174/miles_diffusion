@@ -1403,6 +1403,36 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Number of Ray OCR actors used when --rm-type ocr.",
             )
             parser.add_argument(
+                "--pickscore-num-workers",
+                type=int,
+                default=1,
+                help="Number of Ray PickScore actors used when --rm-type pickscore.",
+            )
+            parser.add_argument(
+                "--pickscore-num-gpus-per-worker",
+                type=float,
+                default=1.0,
+                help="GPU resources per PickScore actor. Use 1.0 for a dedicated GPU smoke test.",
+            )
+            parser.add_argument(
+                "--pickscore-batch-size",
+                type=int,
+                default=8,
+                help="Batch size per PickScore actor call.",
+            )
+            parser.add_argument(
+                "--pickscore-processor-path",
+                type=str,
+                default=None,
+                help="Hugging Face processor path for PickScore. Required when --rm-type pickscore.",
+            )
+            parser.add_argument(
+                "--pickscore-model-path",
+                type=str,
+                default=None,
+                help="Hugging Face model path for PickScore. Required when --rm-type pickscore.",
+            )
+            parser.add_argument(
                 "--custom-rm-path",
                 type=str,
                 default=None,
