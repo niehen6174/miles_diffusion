@@ -33,7 +33,27 @@ def _to_local_gpu_id(physical_gpu_id: int) -> int:
     )
 
 
-def _launch_server_target(server_args):
+def _scheduler_process_with_qwen_image_patch(*args, **kwargs):
+    # Runs inside sglang-d's scheduler grandchild (spawned by launch_server via
+    # mp.Process). Grandchild re-imports modules from scratch under spawn, so
+    # any monkey patches done in the middle child are gone. Apply them HERE,
+    # before calling the real run_scheduler_process, so the DiT that's
+    # constructed inside the grandchild sees the patched classes.
+    from miles.backends.fsdp_utils.models.qwen_image_patch import (
+        apply_qwen_image_diffusers_parity_patches,
+    )
+    apply_qwen_image_diffusers_parity_patches()
+    from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm as _RN
+    print(
+        f"[true-onpolicy grandchild] Qwen-Image diffusers-parity patches applied; "
+        f"RMSNorm.forward = {_RN.forward.__qualname__}",
+        flush=True,
+    )
+    from sglang.multimodal_gen.runtime.managers.gpu_worker import run_scheduler_process
+    return run_scheduler_process(*args, **kwargs)
+
+
+def _launch_server_target(server_args, apply_qwen_image_patch: bool = False):
     # addict.Dict used by SGL-D loses its `__frozen` instance attribute across spawn pickle.
     # Reconstruct a fresh one from the unpickled (broken) instance
     import addict
@@ -41,15 +61,36 @@ def _launch_server_target(server_args):
     if server_args.attention_backend_config is not None:
         server_args.attention_backend_config = addict.Dict(server_args.attention_backend_config)
 
+    if apply_qwen_image_patch:
+        # launch_server spawns its scheduler via mp.Process(target=run_scheduler_process).
+        # Under spawn, target is pickled by qualname and re-imported in the grandchild,
+        # so patching in THIS process doesn't help. Instead, rebind the name inside
+        # launch_server's own module to point at our wrapper — pickle then carries
+        # the miles qualname across to the grandchild, which applies the patch before
+        # calling the real scheduler entrypoint.
+        import sglang.multimodal_gen.runtime.launch_server as _ls_mod
+        _ls_mod.run_scheduler_process = _scheduler_process_with_qwen_image_patch
+        print(
+            "[true-onpolicy] rebound launch_server.run_scheduler_process to miles wrapper "
+            "so grandchild scheduler process applies Qwen-Image diffusers-parity patches.",
+            flush=True,
+        )
+
     from sglang.multimodal_gen.runtime.launch_server import launch_server
     launch_server(server_args)
 
 
-def launch_server_process(server_args: ServerArgs) -> multiprocessing.Process:
+def launch_server_process(
+    server_args: ServerArgs,
+    apply_qwen_image_patch: bool = False,
+) -> multiprocessing.Process:
     # use spawn to avoid potential risks of fork in terms of subthreads or CUDA.
     multiprocessing.set_start_method("spawn", force=True)
     server_args.host = server_args.host.strip("[]")
-    p = multiprocessing.Process(target=_launch_server_target, args=(server_args,))
+    p = multiprocessing.Process(
+        target=_launch_server_target,
+        args=(server_args, apply_qwen_image_patch),
+    )
     p.start()
 
     _wait_server_healthy(
@@ -144,7 +185,16 @@ class SGLangDiffusionEngine(RayActor):
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
         self._pin_to_assigned_gpu()
-        self.process = launch_server_process(ServerArgs.from_kwargs(**server_args_dict))
+        apply_patch = bool(getattr(self.args, "diffusion_true_onpolicy", False))
+        if apply_patch:
+            logger.info(
+                "Launching sglang-d with Qwen-Image diffusers-parity patches "
+                "(--diffusion-true-onpolicy)"
+            )
+        self.process = launch_server_process(
+            ServerArgs.from_kwargs(**server_args_dict),
+            apply_qwen_image_patch=apply_patch,
+        )
 
         if self.node_rank == 0 and self.router_ip and self.router_port:
             if self.args.use_miles_router:
@@ -325,13 +375,6 @@ def _compute_server_args(args, host, port, nccl_port):
         # Force-skip warmup to prevent warmup timeout during RL rollouts.
         "warmup": False,
     }
-    # Mirror --diffusion-rollout-dtype onto SGL-D's compute dtype so the
-    # rollout engine's DiT runs at the precision the training side casts
-    # inputs to. Controls weight-load dtype (pipeline_config.dit_precision via
-    # ServerArgs._adjust_dtype) and DenoisingStage autocast.
-    _dtype = getattr(args, "diffusion_rollout_dtype", None)
-    if _dtype in ("bf16", "fp16", "fp32"):
-        kwargs["dit_dtype"] = _dtype
 
     # Forward every `args.sglang_<field>` the user set via --sglang-* CLI for
     # ServerArgs fields not already hardcoded above. Picks up ulysses_degree /

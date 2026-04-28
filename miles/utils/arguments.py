@@ -117,17 +117,46 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="The backend for training.",
             )
             # Diffusion GRPO training knobs (used by DiffusionFSDPTrainRayActor).
+            #
+            # Per-optim-step the train loop sees an (M, T_sde) grid — M samples
+            # in this optim window × T_sde SDE timesteps per sample. The grid is
+            # processed as tiles of size (sample_microbatch, tstep_microbatch),
+            # gradients accumulating across tiles, optimizer steps once at the
+            # end of the window. Two extreme presets:
+            #
+            #   sample_microbatch = M, tstep_microbatch = 1, iter_order = sample_major
+            #     → outer loop over T_sde, inner forward = (M, 1, ...)
+            #     → memory peak ∝ M (the current default).
+            #
+            #   sample_microbatch = 1, tstep_microbatch = T_sde, iter_order = timestep_major
+            #     → outer loop over samples, inner forward = (1, T_sde, ...)
+            #     → memory peak ∝ T_sde (lower when M is the limit on 2-GPU runs).
+            #
+            # Loss scaling is uniform across plans: each tile's mean PPO loss is
+            # divided by total tile count, so net gradient = mean over (M, T_sde).
             parser.add_argument(
-                "--diffusion-train",
-                action="store_true",
-                default=False,
-                help="Use diffusion GRPO training actor instead of text RL.",
+                "--micro-batch-size-sample",
+                type=int,
+                default=None,
+                help="Samples per DiT forward in train (sample-axis tile size). None = full window (= local_batch_size).",
             )
             parser.add_argument(
-                "--diffusion-timestep-batch",
+                "--micro-batch-size-tstep",
                 type=int,
                 default=1,
-                help="Number of timesteps to batch together in one DiT forward pass during training.",
+                help="SDE timesteps per DiT forward in train (tstep-axis tile size). Default 1.",
+            )
+            parser.add_argument(
+                "--diffusion-train-iter-order",
+                type=str,
+                choices=["sample_major", "timestep_major"],
+                default="sample_major",
+                help=(
+                    "Outer-loop axis when iterating tiles. sample_major: outer "
+                    "loop over timestep tiles (low memory when sample_microbatch "
+                    "is large). timestep_major: outer loop over sample tiles "
+                    "(low memory when tstep_microbatch is large)."
+                ),
             )
             parser.add_argument(
                 "--diffusion-clip-range",
@@ -142,10 +171,30 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Max absolute value for advantage clipping in diffusion training.",
             )
             parser.add_argument(
-                "--diffusion-gradient-accumulation-steps",
-                type=int,
-                default=1,
-                help="Number of trajectories to accumulate per optimizer step (matches flow_grpo train.gradient_accumulation_steps).",
+                "--fsdp-master-dtype",
+                type=str,
+                default="fp32",
+                choices=["fp16", "bf16", "fp32"],
+                help=(
+                    "dtype for the FSDP-wrapped master copy of the model. "
+                    "Loaded at this dtype, sharded at this dtype, optimizer state "
+                    "lives at this precision. fp32 (default) gives proper "
+                    "mixed-precision training when paired with a lower "
+                    "--diffusion-forward-dtype."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-forward-dtype",
+                type=str,
+                default="bf16",
+                choices=["fp16", "bf16", "fp32"],
+                help=(
+                    "dtype for the DiT forward compute. Used in three places "
+                    "with the same value: sglang-d rollout engine, FSDP "
+                    "MixedPrecisionPolicy.param_dtype on the training side, "
+                    "and the training-side input cast that matches rollout "
+                    "for log-prob alignment."
+                ),
             )
             parser.add_argument(
                 "--qkv-format",
@@ -258,30 +307,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Device for diffusion rollout, e.g. cuda or cpu. Defaults to auto.",
             )
             parser.add_argument(
-                "--fsdp-master-dtype",
-                type=str,
-                default="fp32",
-                choices=["fp16", "bf16", "fp32"],
-                help=(
-                    "dtype for the FSDP-wrapped master copy of the model. "
-                    "Loaded at this dtype, sharded at this dtype, optimizer state "
-                    "lives at this precision. fp32 (default) gives proper "
-                    "mixed-precision training when paired with a lower "
-                    "--diffusion-rollout-dtype."
-                ),
-            )
-            parser.add_argument(
-                "--diffusion-rollout-dtype",
-                type=str,
-                default="bf16",
-                choices=["fp16", "bf16", "fp32"],
-                help=(
-                    "dtype for the rollout-side DiT compute (sglang-d engine + the "
-                    "training-side input cast that matches rollout for log-prob "
-                    "alignment + FSDP's MixedPrecisionPolicy.param_dtype)."
-                ),
-            )
-            parser.add_argument(
                 "--diffusion-num-steps",
                 type=int,
                 default=10,
@@ -373,6 +398,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help="Set rollout_log_prob_no_const=true on POST /rollout/generate.",
+            )
+            parser.add_argument(
+                "--diffusion-true-onpolicy",
+                action="store_true",
+                default=False,
+                help=(
+                    "Apply miles.backends.fsdp_utils.models.qwen_image_patch at sglang-d "
+                    "startup so its Qwen-Image DiT forward is bit-exact with diffusers' "
+                    "implementation. Makes rollout (sglang-d path) and training-side log-prob "
+                    "agree on noise_pred down to bf16 ULPs instead of ~1e-3 — making PPO "
+                    "ratio truly on-policy. ~small perf hit on the rollout engine."
+                ),
             )
             parser.add_argument(
                 "--diffusion-debug-mode",
@@ -1879,14 +1916,25 @@ def miles_validate_args(args):
         args.eval_function_path = args.rollout_function_path
 
     if args.num_steps_per_rollout is not None:
-        global_batch_size = args.rollout_batch_size * args.n_samples_per_prompt // args.num_steps_per_rollout
-        if args.global_batch_size is not None:
-            assert args.global_batch_size == global_batch_size, (
-                f"global_batch_size {args.global_batch_size} is not equal to "
-                f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
-                f"// num_steps_per_rollout {args.num_steps_per_rollout}"
+        samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
+        derived_gbs = samples_per_rollout // args.num_steps_per_rollout
+        if args.global_batch_size is not None and args.global_batch_size != derived_gbs:
+            raise ValueError(
+                f"global_batch_size={args.global_batch_size} contradicts "
+                f"rollout_batch_size×n_samples_per_prompt÷num_steps_per_rollout={derived_gbs}; "
+                f"do not pass both."
             )
-        args.global_batch_size = global_batch_size
+        args.global_batch_size = derived_gbs
+
+    dp_size = args.actor_num_gpus_per_node * args.actor_num_nodes
+    if args.global_batch_size is not None:
+        assert args.global_batch_size % dp_size == 0, (
+            f"global_batch_size {args.global_batch_size} is not divisible by dp_size {dp_size}"
+        )
+        args.local_batch_size = args.global_batch_size // dp_size
+    else:
+        args.local_batch_size = 1
+        args.global_batch_size = dp_size
 
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False

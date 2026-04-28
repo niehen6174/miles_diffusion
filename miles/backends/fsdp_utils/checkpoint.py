@@ -45,7 +45,10 @@ class ModelState(Stateful):
 
 
 class OptimizerState(Stateful):
-    """Wrapper for optimizer state only."""
+    """Wrapper for optimizer state only. ``allowed_missing`` is a list of
+    substring patterns; matching params are filtered out of the saved/loaded
+    state dict so DCP's strict matching tolerates trainable params whose
+    forward output is unreachable from the loss (architectural dead params)."""
 
     def __init__(self, model, optimizer, allowed_missing: list[str] | None = None):
         self.model = model
@@ -133,6 +136,7 @@ def load(actor: Any) -> dict[str, Any] | None:
         logger.info(f"[FSDP] Model checkpoint {model_dir} not found; skipping load.")
         return None
 
+    # Load model weights (always)
     lora_only = bool(getattr(actor.args, "use_lora", False))
     model_state = ModelState(actor.model, lora_only=lora_only)
     state_dict = {"model_state": model_state}
@@ -235,6 +239,7 @@ def save(actor: Any, iteration: int) -> None:
         lr_scheduler_dir.mkdir(parents=True, exist_ok=True)
     dist.barrier()
 
+    # Save model weights
     lora_only = bool(getattr(actor.args, "use_lora", False))
     model_state = ModelState(actor.model, lora_only=lora_only)
     state_dict = {"model_state": model_state}

@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 _PIPELINE = None
 _REWARD_FN = None
-_LOGGED_ROLLOUT_IDS: set[int] = set()
 _STAT_TRACKER: PerPromptStatTracker | None = None
 _REWARD_SPEC = None
 _ROLLOUT_PG = None
@@ -138,10 +137,8 @@ def _get_device(args: Namespace) -> torch.device:
 
 
 def _get_dtype(args: Namespace) -> torch.dtype:
-    dtype = getattr(args, "diffusion_rollout_dtype", "fp16")
-    if dtype == "fp32":
-        return torch.float32
-    return torch.float16
+    name = getattr(args, "diffusion_forward_dtype", "bf16")
+    return {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[name]
 
 
 def _get_pipeline(args: Namespace) -> StableDiffusion3Pipeline:
@@ -274,50 +271,11 @@ def _calculate_zero_std_ratio(prompts: list[str], rewards: list[float]) -> tuple
     zero_std_ratio = zero_std_count / len(prompt_std_devs)
     return float(zero_std_ratio), float(prompt_std_devs.mean())
 
-def _log_wandb_images_if_enabled(
-    args: Namespace,
-    rollout_id: int,
-    group: list[Sample],
-    images: list,
-    rewards: list[float],
-) -> None:
-    if not getattr(args, "use_wandb", False):
-        return
-    log_n = int(getattr(args, "diffusion_log_images", 0) or 0)
-    if log_n <= 0:
-        return
-    interval = int(getattr(args, "diffusion_log_image_interval", 1) or 1)
-    if interval <= 0:
-        interval = 1
-    if rollout_id % interval != 0:
-        return
-    group_index = getattr(group[0], "group_index", None)
-    if group_index is not None and group_index != 0:
-        return
-    if group_index is None:
-        if rollout_id in _LOGGED_ROLLOUT_IDS:
-            return
-        _LOGGED_ROLLOUT_IDS.add(rollout_id)
-
-    import wandb
-    if wandb.run is None:
-        return
-
-    log_images = []
-    for idx, (img, sample, reward) in enumerate(zip(images, group, rewards, strict=False)):
-        if idx >= log_n:
-            break
-        caption = f"reward={reward:.4f} prompt={sample.prompt}"
-        log_images.append(wandb.Image(img, caption=caption))
-
-    if not log_images:
-        return
-
-    metrics = {
-        "images": log_images,
-        "rollout/step": compute_rollout_step(args, rollout_id),
-    }
-    wandb.log(metrics)
+# NOTE: image logging moved to miles/ray/rollout.py:_log_rollout_images
+# (key "rollout/sample_images" with proper wandb.define_metric, defined in
+# miles/utils/wandb_utils.py:163). The previous "images" key here had no
+# define_metric, which caused wandb workspace to spawn a new image panel
+# per training run. Removed to dedupe.
 
 
 def _run_rollout_group(
@@ -401,7 +359,8 @@ def _run_rollout_group(
     reward_dict = {k: np.asarray(v, dtype=np.float64).tolist() for k, v in reward_dict.items()}
     rewards_avg = reward_dict.get("avg", reward_dict.get("ocr", []))
 
-    _log_wandb_images_if_enabled(args, rollout_id, group, images, rewards_avg)
+    # NOTE: image logging is handled by RolloutManager._log_rollout_images
+    # (key "rollout/sample_images" with proper define_metric), not here.
 
     for idx, sample in enumerate(group):
         per_sample_reward = {k: float(v[idx]) for k, v in reward_dict.items()}
