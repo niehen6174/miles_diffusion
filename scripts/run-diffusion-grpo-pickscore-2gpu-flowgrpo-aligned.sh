@@ -1,34 +1,29 @@
 #!/usr/bin/env bash
-# 2-GPU OCR run, flow_grpo math-equivalent.
-# Per-rollout (= flow_grpo per-epoch):
-#   * 32 unique prompts × k=16 = 512 items / rollout
-#   * num_steps_per_rollout = 2 (= flow_grpo num_optim_per_epoch)
-#   * global_batch_size = 256 (auto-derived: 512 / 2)
-#   * local_batch_size  = 128 (per rank: 256 / 2 GPUs)
-#   * sample_microbatch = 4  (= flow_grpo train_batch_size)
-#   * tstep_microbatch  = 2  (= SDE window size, full window per forward)
-#   * gradient accumulation per optim step per rank = 128/4 = 32 forwards
-# Master + forward dtype = fp32 / bf16 (= flow_grpo's mixed precision).
-# SDE window range 3,5 covers steps {3,4} (per the flow_grpo bug we mirror).
-# Checkpoint: LoRA-only (auto via use_lora), every 20 rollouts.
-# Eval on test split every 50 rollouts.
-
-pkill -9 sgl* 2>/dev/null
-sleep 3
-ray stop --force 2>&1 | tail -1
-pkill -9 ray* 2>/dev/null
-pkill -9 python* 2>/dev/null
-sleep 3
-pkill -9 ray* 2>/dev/null
-pkill -9 python* 2>/dev/null
-ps -eo ppid,state,comm --no-headers | awk '$2=="Z" && $1!=1 && $3~/ray|python|sglang/ {print $1}' | sort -u | xargs -r kill -9 2>/dev/null || true
-sleep 2
+# 2-GPU train + 1-GPU pickscore reward, aligned with flow_grpo
+# `pickscore_qwenimage` config (4-GPU scaled down: rollout_batch_size halved).
+#
+# Per-rollout math:
+#   rollout_batch_size=16 prompts × n_samples=16 = 256 items/rollout
+#   num_steps_per_rollout=2 → 128 items/optim step (global)
+#   ÷ 2 train gpus = 64 items/rank/optim step
+#   tile = (sample=4, tstep=2) = 8 cells, 8 tiles/rank/optim step.
+#
+# Other knobs (matching flow_grpo `pickscore_qwenimage`):
+#   lr=3e-4, adam_beta2=0.999, weight_decay=1e-4, max_grad_norm=1.0,
+#   clip_range=1e-4, beta=0 (no KL), ema=False, same_latent=False,
+#   global_std=True + per-prompt mean, noise_level=1.2, num_steps=10,
+#   eval_steps=50, guidance=4, resolution=512, sde_window_size=2.
+#   sde_window_range=3,5 → effective SDE indices [3,4] (mirror flow_grpo bug).
+#   LoRA: r=64, alpha=128, init=gaussian; mixed precision (master fp32 / forward bf16).
+#
+# Layout: first 2 GPUs in CUDA_VISIBLE_DEVICES = train+sgld colocate,
+# the 3rd GPU = pickscore reward worker (1 GPU dedicated).
 
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export CUDA_VISIBLE_DEVICES=4,5
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,1}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-RUN_NAME="diffusion_grpo_ocr_2gpu_fg_aligned_$(date +%Y%m%d_%H%M%S)"
+RUN_NAME="diffusion_grpo_pickscore_2gpu_flowgrpo_aligned_$(date +%Y%m%d_%H%M%S)"
 SAVE_DIR="${ROOT_DIR}/logs/${RUN_NAME}/ckpt"
 
 WANDB_ARGS=()
@@ -44,15 +39,15 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
   )
 fi
 
-python "${ROOT_DIR}/tools/prepare_ocr_jsonl.py"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
-python -u "${ROOT_DIR}/train_diffusion.py" \
+"${PYTHON_BIN}" -u "${ROOT_DIR}/train_diffusion.py" \
   --train-backend fsdp \
   --rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout \
   --hf-checkpoint Qwen/Qwen-Image \
-  --prompt-data "${ROOT_DIR}/data/ocr/train.jsonl" \
+  --prompt-data "${ROOT_DIR}/data/pickscore/train.jsonl" \
   --input-key input \
-  --rollout-batch-size 32 \
+  --rollout-batch-size 16 \
   --n-samples-per-prompt 16 \
   --num-rollout 100000 \
   --diffusion-microgroup-size 16 \
@@ -63,7 +58,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --actor-num-gpus-per-node 2 \
   --rollout-num-gpus 2 \
   --rollout-num-gpus-per-engine 1 \
-  --num-gpus-per-node 2 \
+  --num-gpus-per-node 3 \
   --colocate \
   --use-lora \
   --lora-rank 64 \
@@ -77,10 +72,15 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --sglang-server-concurrency 4 \
   --update-weight-buffer-size 2147483648 \
   --diffusion-model Qwen/Qwen-Image \
-  --diffusion-reward ocr:1.0 \
+  --diffusion-reward pickscore:1.0 \
   --advantage-estimator grpo \
   --globalize-reward-std \
-  --rm-type ocr \
+  --rm-type pickscore \
+  --pickscore-num-workers 1 \
+  --pickscore-num-gpus-per-worker 1.0 \
+  --pickscore-batch-size 8 \
+  --pickscore-processor-path laion/CLIP-ViT-H-14-laion2B-s32B-b79K \
+  --pickscore-model-path yuvalkirstain/PickScore_v1 \
   --fsdp-master-dtype fp32 \
   --diffusion-forward-dtype bf16 \
   --diffusion-num-steps 10 \
@@ -92,12 +92,13 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
   --diffusion-sde-window-size 2 \
   --diffusion-sde-window-range 3,5 \
+  --diffusion-debug-mode \
   --apply-qwen-image-sgl-d-patch \
   --diffusion-height 512 \
   --diffusion-width 512 \
   --save "${SAVE_DIR}" \
-  --save-interval 20 \
-  --eval-prompt-data ocr_test "${ROOT_DIR}/data/ocr/test.jsonl" \
-  --eval-interval 50 \
+  --save-interval 10 \
+  --eval-prompt-data pickscore_test "${ROOT_DIR}/data/pickscore/test.jsonl" \
+  --eval-interval 30 \
   --skip-eval-before-train \
   "${WANDB_ARGS[@]}"
