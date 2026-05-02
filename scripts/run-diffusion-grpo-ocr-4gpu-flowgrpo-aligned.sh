@@ -1,32 +1,30 @@
-# ps -ef | grep train_diffusion.py | grep -v grep
-#WANDB_API_KEY=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 nohup bash /data/zhiheng/miles/scripts/run-diffusion-grpo-ocr.sh > /data/zhiheng/miles/logs/diffusion_grpo_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-# nohup bash /data/zhiheng/miles/scripts/run-diffusion-grpo-ocr.sh > /data/zhiheng/miles/logs/diffusion_grpo_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-# pkill -f "/data/zhiheng/miles/train_diffusion.py"
-# rollout needs 1 gpu for now, or there's going to be precision issue.
-# parameter rollout-num-gpus and --rollout-num-gpus-per-engine  only makes sense in sglang diffusion case.
 #!/usr/bin/env bash
-
-# NOTE: cleanup pkill / ray-stop block intentionally disabled — these are
-# global (pkill python*, ray stop --force) and would kill any concurrent
-# training on other GPUs. Re-enable manually only if no other trainings are
-# running.
-pkill -9 sgl*
-sleep 3
-ray stop --force
-pkill -9 ray*
-pkill -9 python*
-sleep 3
-pkill -9 ray*
-pkill -9 python*
-ps -eo ppid,state,comm --no-headers | awk '$2=="Z" && $1!=1 && $3~/ray|python|sglang/ {print $1}' | sort -u | xargs -r kill -9 2>/dev/null || true
-sleep 2
+# 4-GPU OCR training aligned with flow_grpo `ocr_qwenimage_4gpu` config.
+#
+# Per-rollout math (matches flow_grpo 4-GPU global totals):
+#   rollout_batch_size=32 prompts × n_samples=16 = 512 items/rollout
+#   num_steps_per_rollout=2 → 256 items/optim step (global)
+#   ÷ 4 train gpus = 64 items/rank/optim step
+#   tile = (sample=4, tstep=2) = 8 cells, 16 tiles/rank/optim step
+#     ↑ matches flow_grpo train_batch_size=4 + gradient_accum=16 + sde_window=2.
+#
+# Other knobs (all match flow_grpo `ocr_qwenimage_4gpu`):
+#   lr=3e-4, adam_beta2=0.999, weight_decay=1e-4, max_grad_norm=1.0,
+#   clip_range=1e-4, beta=0 (no KL), ema=False, same_latent=False (seedfix),
+#   global_std=True + per-prompt mean, noise_level=1.2, num_steps=10,
+#   eval_steps=50, guidance=4, resolution=512, sde_window_size=2.
+#   sde_window_range=3,5 → effective SDE indices [3,4] (mirror flow_grpo bug).
+#   LoRA: r=64, alpha=128, init=gaussian; mixed precision (master fp32 / forward bf16).
+#
+# OCR reward is python-side (no extra GPU worker), so all 4 GPUs go to
+# train+sgld colocate.
 
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# WandB: enable if WANDB_API_KEY is present.
-RUN_NAME="diffusion_grpo_$(date +%Y%m%d_%H%M%S)"
+RUN_NAME="diffusion_grpo_ocr_4gpu_flowgrpo_aligned_$(date +%Y%m%d_%H%M%S)"
+SAVE_DIR="${ROOT_DIR}/logs/${RUN_NAME}/ckpt"
 
 WANDB_ARGS=()
 if [[ -n "${WANDB_API_KEY:-}" ]]; then
@@ -40,13 +38,12 @@ if [[ -n "${WANDB_API_KEY:-}" ]]; then
     --disable-wandb-random-suffix
   )
 fi
-# Prepare OCR prompts into JSONL expected by Miles data loader.
-python "${ROOT_DIR}/tools/prepare_ocr_jsonl.py"
 
-# Minimal diffusion GRPO run, aligned with flow_grpo single-node settings.
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
-#hf-checkpoint can be any text generation model from HuggingFace, used to generate initial prompts for diffusion model.
-python -u "${ROOT_DIR}/train_diffusion.py" \
+"${PYTHON_BIN}" "${ROOT_DIR}/tools/prepare_ocr_jsonl.py"
+
+"${PYTHON_BIN}" -u "${ROOT_DIR}/train_diffusion.py" \
   --train-backend fsdp \
   --rollout-function-path miles.rollout.sglang_diffusion_rollout.generate_rollout \
   --hf-checkpoint Qwen/Qwen-Image \
@@ -55,6 +52,10 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --rollout-batch-size 32 \
   --n-samples-per-prompt 16 \
   --num-rollout 100000 \
+  --diffusion-microgroup-size 16 \
+  --micro-batch-size-sample 4 \
+  --micro-batch-size-tstep 2 \
+  --diffusion-train-iter-order sample_major \
   --gradient-checkpointing \
   --actor-num-gpus-per-node 4 \
   --rollout-num-gpus 4 \
@@ -71,13 +72,14 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --weight-decay 1e-4 \
   --use-miles-router \
   --sglang-server-concurrency 4 \
+  --update-weight-buffer-size 2147483648 \
   --diffusion-model Qwen/Qwen-Image \
   --diffusion-reward ocr:1.0 \
   --advantage-estimator grpo \
   --globalize-reward-std \
   --rm-type ocr \
-  --diffusion-forward-dtype bf16 \
   --fsdp-master-dtype fp32 \
+  --diffusion-forward-dtype bf16 \
   --diffusion-num-steps 10 \
   --diffusion-eval-num-steps 50 \
   --num-steps-per-rollout 2 \
@@ -87,11 +89,13 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
   --diffusion-sde-window-size 2 \
   --diffusion-sde-window-range 3,5 \
+  --diffusion-debug-mode \
   --apply-qwen-image-sgl-d-patch \
-  --update-weight-buffer-size 2147483648 \
   --diffusion-height 512 \
   --diffusion-width 512 \
+  --save "${SAVE_DIR}" \
+  --save-interval 10 \
   --eval-prompt-data ocr_test "${ROOT_DIR}/data/ocr/test.jsonl" \
-  --eval-interval 50 \
+  --eval-interval 30 \
   --skip-eval-before-train \
   "${WANDB_ARGS[@]}"
