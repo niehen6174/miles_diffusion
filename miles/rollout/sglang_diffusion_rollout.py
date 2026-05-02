@@ -100,9 +100,6 @@ class GenerateState(metaclass=SingletonMeta):
             if getattr(args, "diffusion_step_strategy_path", None)
             else None
         )
-        sampling_seed_base = args.rollout_seed
-        self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
-
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
         self.dp_rank = 0
         self.node_id = ray.get_runtime_context().get_node_id()
@@ -234,11 +231,17 @@ async def generate_and_rm_group(
 ) -> list[Sample]:
     state = GenerateState(args)
 
+    # N-spaced base so sgl-d's seed→[seed+0..seed+N-1] expansion stays disjoint
+    # per (rollout, prompt-group); group_index is monotonic across the run.
+    n_per_prompt = int(args.n_samples_per_prompt)
+    group_index = int(getattr(group[0], "group_index", 0) or 0)
+    seed_base = (int(args.rollout_seed) + group_index * n_per_prompt) % (2**31)
+
     tasks = []
     for idx in range(0, len(group), args.diffusion_microgroup_size):
         microgroup = group[idx:min(idx + args.diffusion_microgroup_size, len(group))]
         current_sampling_params = sampling_params.copy()
-        current_sampling_params["seed"] = state.group_sampling_seeds[idx]
+        current_sampling_params["seed"] = seed_base + idx
         tasks.append(
             asyncio.create_task(generate_and_rm_microgroup(args, microgroup, current_sampling_params, evaluation=evaluation))
         )
