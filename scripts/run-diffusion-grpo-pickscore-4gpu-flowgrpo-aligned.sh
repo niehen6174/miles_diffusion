@@ -98,7 +98,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
   --diffusion-sde-window-size 2 \
   --diffusion-sde-window-range 3,5 \
-  --apply-sgld-parity-patch \
+  --apply-sgld-monkey-patches \
   --diffusion-height 512 \
   --diffusion-width 512 \
   --save "${SAVE_DIR}" \

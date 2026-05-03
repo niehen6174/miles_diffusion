@@ -4,7 +4,7 @@ from sglang.multimodal_gen.runtime.layers.layernorm import (
     ScaleResidualLayerNormScaleShift,
 )
 
-from miles.sgld_parity._common import ensure_broadcast
+from miles.backends.sglang_diffusion_utils.monkey_patches._common import ensure_broadcast
 
 
 def _patched_forward(

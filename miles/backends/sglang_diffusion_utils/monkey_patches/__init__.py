@@ -7,10 +7,10 @@ diffusers-style training-side forwards down to bf16 ULPs.
 
 Patches are at the op layer, not the model layer — they apply to every sgl-d
 DiT that uses these generic classes. Adding alignment for a new op = drop a
-new ``patch_<op>.py`` file and add it to ``apply_sgld_parity_patches``.
+new ``patch_<op>.py`` file and add it to ``apply_sgld_monkey_patches``.
 """
 
-from miles.sgld_parity import (
+from miles.backends.sglang_diffusion_utils.monkey_patches import (
     patch_layernorm_scale_shift,
     patch_mul_add,
     patch_qk_norm_rope,
@@ -20,7 +20,7 @@ from miles.sgld_parity import (
 )
 
 
-def apply_sgld_parity_patches() -> None:
+def apply_sgld_monkey_patches() -> None:
     patch_rmsnorm.apply()
     patch_layernorm_scale_shift.apply()
     patch_scale_residual_layernorm.apply()

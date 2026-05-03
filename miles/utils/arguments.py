@@ -423,14 +423,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Set rollout_log_prob_no_const=true on POST /rollout/generate.",
             )
             parser.add_argument(
-                "--apply-sgld-parity-patch",
+                "--apply-sgld-monkey-patches",
                 action="store_true",
                 default=False,
                 help=(
-                    "Apply miles.sgld_parity at sglang-d startup so its DiT forward "
-                    "is bit-exact with diffusers' implementation. Makes rollout "
-                    "(sglang-d path) and training-side log-prob agree on noise_pred "
-                    "down to bf16 ULPs. Small perf hit on the rollout engine."
+                    "Apply miles.backends.sglang_diffusion_utils.monkey_patches at "
+                    "sglang-d startup so its DiT forward is bit-exact with diffusers' "
+                    "implementation. Makes rollout (sglang-d path) and training-side "
+                    "log-prob agree on noise_pred down to bf16 ULPs. Small perf hit on "
+                    "the rollout engine."
                 ),
             )
             parser.add_argument(
