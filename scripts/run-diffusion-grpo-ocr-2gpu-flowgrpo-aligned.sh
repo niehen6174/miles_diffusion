@@ -87,7 +87,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
   --diffusion-sde-window-size 2 \
   --diffusion-sde-window-range 3,5 \
   --diffusion-debug-mode \
-  --apply-qwen-image-sgl-d-patch \
+  --apply-sgld-parity-patch \
   --diffusion-height 512 \
   --diffusion-width 512 \
   --save "${SAVE_DIR}" \
