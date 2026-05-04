@@ -999,30 +999,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=("Dump all details of training for post-hoc analysis and visualization."),
             )
-            # use together with --record-memory-history and --memory-snapshot-path (defined in Megatron)
-            parser.add_argument(
-                "--memory-snapshot-dir",
-                type=str,
-                default=".",
-            )
-            parser.add_argument(
-                "--memory-snapshot-num-steps",
-                type=int,
-                default=None,
-            )
-            parser.add_argument(
-                "--profile-target",
-                type=str,
-                choices=["train_overall", "train_actor", "train_log_probs"],
-                default=["train_overall"],
-                nargs="+",
-            )
-            parser.add_argument(
-                "--memory-recorder",
-                type=str,
-                choices=["torch", "memray"],
-                default="torch",
-            )
             parser.add_argument("--check-weight-update-equal", action="store_true")
             return parser
 
