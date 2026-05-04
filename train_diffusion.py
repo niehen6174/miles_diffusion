@@ -25,10 +25,9 @@ def train(args):
     rollout_manager, num_rollout_per_epoch = create_rollout_manager(args, pgs["rollout"])
     logger.info("train: rollout manager ready")
 
-    # create the actor and critic models
-    logger.info("train: creating training models")
-    actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
-    logger.info("train: training models ready")
+    logger.info("train: creating training model")
+    actor_model = create_training_models(args, pgs, rollout_manager)
+    logger.info("train: training model ready")
 
     if args.offload_rollout:
         ray.get(rollout_manager.onload_weights.remote())

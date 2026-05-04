@@ -138,9 +138,6 @@ class FSDPTrainRayActor(TrainRayActor):
     def _get_parallel_config(self) -> dict:
         return {"dp_size": getattr(self.parallel_state, "dp_size", 1)}
 
-    def connect_actor_critic(self, critic_group) -> None:  # type: ignore[override]
-        return
-
     @timer
     def sleep(self) -> None:
         if not self.args.offload_train:

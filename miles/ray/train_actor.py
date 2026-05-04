@@ -134,10 +134,6 @@ class TrainRayActor(RayActor):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def connect_actor_critic(self, critic_group):
-        raise NotImplementedError
-
-    @abc.abstractmethod
     def _get_parallel_config(self):
         raise NotImplementedError
 
