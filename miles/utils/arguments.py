@@ -181,6 +181,25 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fsdp-cpu-offload",
+                action=argparse.BooleanOptionalAction,
+                default=False,
+                help=(
+                    "Enable FSDP CPU offload for parameters and gradients. "
+                    "Default False (keep everything on GPU)."
+                ),
+            )
+            parser.add_argument(
+                "--fsdp-cpu-backend",
+                type=str,
+                default="gloo",
+                help=(
+                    "CPU collective backend for FSDP CPU offload (e.g. 'gloo'). "
+                    "Used together with --fsdp-cpu-offload to set up the hybrid "
+                    "cpu+cuda process group. Set to empty to disable."
+                ),
+            )
+            parser.add_argument(
                 "--fsdp-master-dtype",
                 type=str,
                 default="fp32",
@@ -350,7 +369,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--diffusion-guidance-scale",
                 type=float,
-                default=4.5,
+                default=4.0,
                 help="Guidance scale for diffusion rollout.",
             )
             parser.add_argument(
