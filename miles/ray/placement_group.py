@@ -79,10 +79,25 @@ def _create_placement_group(num_gpus):
 
 
 def create_placement_groups(args):
-    """Create placement groups for actor and rollout engines."""
-    assert args.colocate or args.debug_train_only or args.debug_rollout_only, (
-        "Non-colocated placement is not supported."
-    )
+    """Create placement groups for actor and rollout engines.
+
+    Two topologies:
+    - Colocate (or --debug-{train,rollout}-only): one combined placement
+      group; both roles see the same bundle list.
+    - Disaggregate (the else branch): two separate placement groups so
+      train and rollout each own a disjoint GPU pool — avoids bundle
+      overlap / scheduling deadlock when running side-by-side.
+    """
+    if not args.colocate and not args.debug_train_only and not args.debug_rollout_only:
+        logger.info("Creating placement groups (separate actor/rollout)...")
+        actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+        rollout_gpus = args.rollout_num_gpus
+        actor_pg = _create_placement_group(actor_gpus) if actor_gpus > 0 else None
+        rollout_pg = _create_placement_group(rollout_gpus) if rollout_gpus > 0 else None
+        return {
+            "actor": actor_pg,
+            "rollout": rollout_pg,
+        }
 
     if args.debug_rollout_only:
         num_gpus = args.rollout_num_gpus
