@@ -50,14 +50,13 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.args.debug_rollout_only:
             return 0
 
-        self.fsdp_cpu_offload = getattr(self.args, "fsdp_cpu_offload", False)
-        if self.args.offload_train and self.fsdp_cpu_offload:
+        if self.args.offload_train and self.args.fsdp_cpu_offload:
             self.args.offload_train = False
 
         if dist.get_rank() == 0:
             init_tracking(args, primary=False)
-        
-        if getattr(self.args, "start_rollout_id", None) is None:
+
+        if self.args.start_rollout_id is None:
             self.args.start_rollout_id = 0
 
         self.prof = TrainProfiler(args)
@@ -80,7 +79,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.train_pipeline_config = get_train_pipeline_config(args.diffusion_model)
 
-        if getattr(args, "use_lora", False):
+        if args.use_lora:
             model = apply_lora(model, args, self.train_pipeline_config)
 
         model.train()
@@ -95,7 +94,7 @@ class FSDPTrainRayActor(TrainRayActor):
         model = apply_fsdp2(
             model,
             mesh=self.parallel_state.dp_mesh,
-            cpu_offload=self.fsdp_cpu_offload,
+            cpu_offload=self.args.fsdp_cpu_offload,
             args=self.args,
         )
         # Force a sync to ensure sharding is complete and old memory is freed.
@@ -123,7 +122,7 @@ class FSDPTrainRayActor(TrainRayActor):
         # sglang-d now supports /update_weights_from_tensor (PR #20464).
         self.weight_updater = (
             DiffusionUpdateWeightFromTensorLoRA(self.args, self.model)
-            if getattr(self.args, "use_lora", False)
+            if self.args.use_lora
             else DiffusionUpdateWeightFromTensor(self.args, self.model)
         )
 
@@ -134,7 +133,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.prof.on_init_end()
 
-        return int(getattr(self.args, "start_rollout_id", 0))
+        return self.args.start_rollout_id
 
     def _get_parallel_config(self) -> dict:
         return {"dp_size": getattr(self.parallel_state, "dp_size", 1)}
@@ -206,15 +205,7 @@ class FSDPTrainRayActor(TrainRayActor):
         return torch.device("cpu")
 
     def _gather_and_log_metrics(self, rollout_id: int, log_dict: dict[str, float], step: int) -> None:
-        """Reduce per-rank scalars and log.
-
-        ``train/lr`` and ``train/epoch`` are placed under the ``train/`` prefix
-        so wandb's ``define_metric("train/*", step_metric="train/step")`` puts
-        them in the same Charts row as the other train scalars, with x-axis =
-        ``train/step``. Logging them at root (``"lr"``, ``"epoch"``) would put
-        them in wandb's default "Charts" section against the auto-incrementing
-        internal commit step instead.
-        """
+        """Reduce per-rank scalars and log."""
         if "train/lr" not in log_dict and hasattr(self, "optimizer"):
             try:
                 log_dict["train/lr"] = float(self.optimizer.param_groups[0]["lr"])
@@ -232,19 +223,12 @@ class FSDPTrainRayActor(TrainRayActor):
             reduced = {k: sum(d[k] for d in gathered) / dp_size for k in log_dict}
             reduced["train/epoch"] = float(rollout_id)
             reduced["rollout/step"] = compute_rollout_step(self.args, rollout_id)
-            # wandb.define_metric("train/*", step_metric="train/step") pulls the
-            # x-axis value from this key; ``train/step`` subsumes what we used
-            # to also log as a separate ``global_step`` metric.
             reduced["train/step"] = float(step)
             tracking_utils.log(self.args, reduced, step_key="train/step")
-            # Stdout mirror so we can spot misalignment / divergence without wandb.
-            # Use scientific notation with 6 significant digits so fp32-level
-            # alignment metrics (log_prob_mean_abs_diff, ratio_abs_minus_1, etc.)
-            # don't get truncated to 0.0000 by a fixed-decimal format.
-            print(
+
+            logger.info(
                 f"[train step {int(step)}] rollout={rollout_id} "
-                + " ".join(f"{k}={v:.6e}" for k, v in sorted(reduced.items()) if k not in ("train/epoch", "rollout/step", "train/step")),
-                flush=True,
+                + " ".join(f"{k}={v:.6e}" for k, v in sorted(reduced.items()) if k not in ("train/epoch", "rollout/step", "train/step"))
             )
         else:
             dist.gather_object(
@@ -255,14 +239,10 @@ class FSDPTrainRayActor(TrainRayActor):
             )
 
     def train(self, rollout_id: int, rollout_data_ref) -> None:  # type: ignore[override]
-        # Always wake_up: first call moves from CPU to GPU; subsequent calls
-        # are no-ops (offload_train=False) or re-load from CPU (offload_train=True).
         if self.args.offload_train:
             self.wake_up()
 
         with inverse_timer("train_wait"), timer("train"):
-            # Fetch this DP rank's data directly — already split by
-            # _split_train_data_by_dp in the RolloutManager.
             rollout_data = ray.get(rollout_data_ref[self.parallel_state.dp_rank].inner)
             if self.args.debug_rollout_only:
                 return
@@ -297,33 +277,35 @@ class FSDPTrainRayActor(TrainRayActor):
         """
         device = torch.cuda.current_device()
 
+        # ------------- Sample Data -------------
         denoising_envs = rollout_data["denoising_env"]
         dit_trajectories = rollout_data["dit_trajectory"]
-        rewards = torch.tensor(rollout_data["rewards"], device=device, dtype=torch.float32)
-        rollout_log_probs_list = rollout_data["rollout_log_probs"]
-        sde_step_indices_list = rollout_data.get("sde_step_indices") or [None] * len(denoising_envs)
-        # Per-sample post-CFG model_output recorded by sgld; only present under
-        # --diffusion-debug-mode. Used for the train/model_output_*_diff wandb keys.
         rollout_debug_tensors_list = rollout_data.get("rollout_debug_tensors") or [None] * len(denoising_envs)
+        sde_step_indices_list = rollout_data.get("sde_step_indices") or [None] * len(denoising_envs)
+        rollout_log_probs_list = rollout_data["rollout_log_probs"]
 
-        batch_size = len(denoising_envs)
-        guidance_scale = float(getattr(self.args, "diffusion_guidance_scale", 0))
-        true_cfg_scale_arg = getattr(self.args, "diffusion_true_cfg_scale", None)
-        true_cfg_scale = float(true_cfg_scale_arg) if true_cfg_scale_arg is not None else None
-        # Mirror sglang-d: use true_cfg_scale when set, else guidance_scale.
+        # ------------- CFG Scale -------------
+        guidance_scale = self.args.diffusion_guidance_scale
+        true_cfg_scale = self.args.diffusion_true_cfg_scale
         cfg_scale = true_cfg_scale if true_cfg_scale is not None else guidance_scale
         use_cfg = cfg_scale > 0
-        clip_range = float(getattr(self.args, "diffusion_clip_range", 1e-4))
-        adv_clip_max = float(getattr(self.args, "diffusion_adv_clip_max", 5.0))
-        noise_level = float(getattr(self.args, "diffusion_noise_level", 0.7))
-        num_timesteps = dit_trajectories[0].timesteps.shape[0]
 
-        advantages = rewards.unsqueeze(1).expand(-1, num_timesteps).clone()
+        # ------------- training parameters -------------
+        # See docs/developer_guide/terminology.md for batch-size naming convention.
+        num_rollout_samples = len(denoising_envs)
+        clip_range = self.args.diffusion_clip_range
+        adv_clip_max = self.args.diffusion_adv_clip_max
+        noise_level = self.args.diffusion_noise_level
+        # assume all trajectories have the same number of rollout steps
+        num_rollout_steps = dit_trajectories[0].timesteps.shape[0]
+
+        # ------------- rewards -------------
+        rewards = torch.tensor(rollout_data["rewards"], device=device, dtype=torch.float32)
+        advantages = rewards.unsqueeze(1).expand(-1, num_rollout_steps).clone()
         advantages = torch.clamp(advantages, -adv_clip_max, adv_clip_max)
 
+        # ------------- scheduler -------------
         # Use rollout's exact timesteps AND derive matching sigmas.
-        # Qwen-Image flow-match uses `use_dynamic_shifting=True` (mu depends on
-        # image resolution), so the rollout's timesteps are post-shift.
         timesteps_ref = dit_trajectories[0].timesteps.to(device).float()
         num_train_timesteps = self.scheduler.config.num_train_timesteps
         sigmas_ref = timesteps_ref / float(num_train_timesteps)
@@ -334,21 +316,18 @@ class FSDPTrainRayActor(TrainRayActor):
         self.scheduler._step_index = None
         self.scheduler._begin_index = None
 
-        train_num_timesteps = max(1, num_timesteps)
-        local_batch_size = max(1, int(getattr(self.args, "local_batch_size", 1)))
-        num_optim_steps_per_rollout = (batch_size + local_batch_size - 1) // local_batch_size
+        num_optim_steps_per_rollout = self.args.num_steps_per_rollout
+        num_samples_per_optim_step = num_rollout_samples // num_optim_steps_per_rollout
 
-        sample_microbatch_arg = getattr(self.args, "micro_batch_size_sample", None)
-        tstep_microbatch_arg = getattr(self.args, "micro_batch_size_tstep", None)
-        iter_order = getattr(self.args, "diffusion_train_iter_order", "sample_major")
+        iter_order = self.args.diffusion_train_iter_order
         assert iter_order in ("sample_major", "timestep_major"), iter_order
 
         with timer("actor_train"):
             for step_id in range(num_optim_steps_per_rollout):
                 self.optimizer.zero_grad(set_to_none=True)
 
-                traj_start = step_id * local_batch_size
-                traj_end = min(batch_size, traj_start + local_batch_size)
+                traj_start = step_id * num_samples_per_optim_step
+                traj_end = min(num_rollout_samples, traj_start + num_samples_per_optim_step)
                 grids = self._build_train_grids(
                     traj_start=traj_start,
                     traj_end=traj_end,
@@ -358,23 +337,25 @@ class FSDPTrainRayActor(TrainRayActor):
                     sde_step_indices_list=sde_step_indices_list,
                     rollout_debug_tensors_list=rollout_debug_tensors_list,
                     advantages=advantages,
-                    train_num_timesteps=train_num_timesteps,
+                    default_window_size=num_rollout_steps,
                     use_cfg=use_cfg,
                     device=device,
                 )
 
-                local_batch_size = grids["local_batch_size"]
+                num_samples_in_window = grids["num_samples_in_window"]
                 sde_window_size = grids["sde_window_size"]
                 sample_microbatch = min(
-                    sample_microbatch_arg if sample_microbatch_arg is not None else local_batch_size,
-                    local_batch_size,
+                    self.args.micro_batch_size_sample
+                    if self.args.micro_batch_size_sample is not None
+                    else num_samples_in_window,
+                    num_samples_in_window,
                 )
                 tstep_microbatch = min(
-                    tstep_microbatch_arg if tstep_microbatch_arg is not None else 1,
+                    self.args.micro_batch_size_tstep
+                    if self.args.micro_batch_size_tstep is not None
+                    else 1,
                     sde_window_size,
                 )
-                sample_microbatch = max(1, sample_microbatch)
-                tstep_microbatch = max(1, tstep_microbatch)
 
                 log_stats = self._run_optim_window(
                     grids=grids,
@@ -390,22 +371,16 @@ class FSDPTrainRayActor(TrainRayActor):
                 )
 
                 self.prof.step(rollout_id=rollout_id)
-                if not getattr(self.args, "debug_skip_optimizer_step", False):
+                if not self.args.debug_skip_optimizer_step:
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad)
                     log_stats["grad_norm"].append(grad_norm.detach())
                     self.optimizer.step()
                     self.lr_scheduler.step()
                 else:
-                    # Keep weights frozen so noise_pred / log_prob alignment
-                    # checks remain interpretable across iterations.
                     self.optimizer.zero_grad(set_to_none=True)
                 self.global_step += 1
 
-                # Prefix with "train/" so wandb groups these under the Train
-                # panel and picks up define_metric("train/*",
-                # step_metric="train/step") — otherwise they fall into the
-                # default "Charts" section and plot against wandb's
-                # auto-incrementing internal step.
+                # Do mean over all ranks for now, may need to be updated for p99, max, etc.
                 reduced = {f"train/{k}": torch.stack(v).mean().item() for k, v in log_stats.items()}
                 self._gather_and_log_metrics(rollout_id, reduced, step=self.global_step)
 
@@ -420,7 +395,7 @@ class FSDPTrainRayActor(TrainRayActor):
         sde_step_indices_list: list,
         rollout_debug_tensors_list: list,
         advantages: torch.Tensor,
-        train_num_timesteps: int,
+        default_window_size: int,
         use_cfg: bool,
         device: torch.device,
     ) -> dict:
@@ -435,9 +410,12 @@ class FSDPTrainRayActor(TrainRayActor):
         sde_window_size: int | None = None
 
         for traj_idx in range(traj_start, traj_end):
+            # prepare trajectory:
             latents, next_latents, timesteps = train_pipeline_config.prepare_trajectory(
                 dit_trajectories[traj_idx], device
             )
+
+            # prepare cond kwargs (denoising_env)
             denoising_env = denoising_envs[traj_idx]
             positive_cond_kwargs_list.append(
                 train_pipeline_config.prepare_cond_kwargs(denoising_env.pos_cond_kwargs, device)
@@ -446,16 +424,20 @@ class FSDPTrainRayActor(TrainRayActor):
                 negative_cond_kwargs_list.append(
                     train_pipeline_config.prepare_cond_kwargs(denoising_env.neg_cond_kwargs, device)
                 )
+
+            # prepare objective
             log_prob_old = rollout_log_probs_list[traj_idx].to(device, dtype=torch.float32)
             advantage = advantages[traj_idx]
 
-            sde_step_indices = sde_step_indices_list[traj_idx]
+            
             rollout_dbg = rollout_debug_tensors_list[traj_idx] if rollout_debug_tensors_list else None
             rollout_model_output = (
                 rollout_dbg.rollout_model_outputs.to(device, dtype=torch.float32)
                 if rollout_dbg is not None and rollout_dbg.rollout_model_outputs is not None
                 else None
             )
+
+            sde_step_indices = sde_step_indices_list[traj_idx]
             if sde_step_indices is not None:
                 sde_indices_tensor = torch.as_tensor(sde_step_indices, device=device, dtype=torch.long)
                 latents = latents[sde_indices_tensor]
@@ -467,7 +449,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     rollout_model_output = rollout_model_output[sde_indices_tensor]
                 current_window_size = int(sde_indices_tensor.numel())
             else:
-                current_window_size = train_num_timesteps
+                current_window_size = default_window_size
 
             if sde_window_size is None:
                 sde_window_size = current_window_size
@@ -498,11 +480,11 @@ class FSDPTrainRayActor(TrainRayActor):
         # Skip the (possibly NotImplementedError-raising) collate when no tile
         # will ever have sample > 1: a model that only does timestep-only tiling
         # then doesn't need to override collate_cond_for_sample_batch.
-        local_batch_size = int(traj_end - traj_start)
-        sample_microbatch_arg = getattr(self.args, "micro_batch_size_sample", None)
+        num_samples_in_window = int(traj_end - traj_start)
         needs_multi_sample_tile = (
-            sample_microbatch_arg is None or sample_microbatch_arg > 1
-        ) and local_batch_size > 1
+            self.args.micro_batch_size_sample is None
+            or self.args.micro_batch_size_sample > 1
+        ) and num_samples_in_window > 1
 
         if not needs_multi_sample_tile:
             cond_collated = None
@@ -524,7 +506,7 @@ class FSDPTrainRayActor(TrainRayActor):
             "cond": cond_collated,
             "per_sample_pos_cond": positive_cond_kwargs_list,
             "per_sample_neg_cond": negative_cond_kwargs_list,
-            "local_batch_size": int(traj_end - traj_start),
+            "num_samples_in_window": num_samples_in_window,
             "sde_window_size": int(sde_window_size or 0),
             "rollout_model_outputs": rollout_model_outputs_window,
         }
@@ -545,11 +527,11 @@ class FSDPTrainRayActor(TrainRayActor):
     ) -> dict[str, list[torch.Tensor]]:
         """Iterate tiles across the window grid; one DiT forward + PPO loss +
         backward per tile. All tiles share `(loss / num_tiles).backward()` so
-        net gradient = mean over (local_batch_size × sde_window_size) cells."""
+        net gradient = mean over (num_samples_in_window × sde_window_size) cells."""
         device = grids["latents"].device
-        local_batch_size = grids["local_batch_size"]
+        num_samples_in_window = grids["num_samples_in_window"]
         sde_window_size = grids["sde_window_size"]
-        sample_chunks = _chunked_indices(local_batch_size, sample_microbatch, device)
+        sample_chunks = _chunked_indices(num_samples_in_window, sample_microbatch, device)
         tstep_chunks = _chunked_indices(sde_window_size, tstep_microbatch, device)
         num_tiles = len(sample_chunks) * len(tstep_chunks)
 
@@ -559,7 +541,6 @@ class FSDPTrainRayActor(TrainRayActor):
             outer_chunks, inner_chunks = sample_chunks, tstep_chunks
 
         log_stats: dict[str, list[torch.Tensor]] = defaultdict(list)
-        skip_optimizer_step = bool(getattr(self.args, "debug_skip_optimizer_step", False))
 
         for outer in outer_chunks:
             for inner in inner_chunks:
@@ -579,7 +560,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     num_train_timesteps=num_train_timesteps,
                     log_stats=log_stats,
                 )
-                if not skip_optimizer_step:
+                if not self.args.debug_skip_optimizer_step:
                     (loss / num_tiles).backward()
 
         return log_stats
@@ -600,12 +581,11 @@ class FSDPTrainRayActor(TrainRayActor):
     ) -> torch.Tensor:
         """One DiT forward over a tile of (tile_sample × tile_tstep) cells
         flattened to batch = tile_sample * tile_tstep."""
-        device = grids["latents"].device
         forward_dtype = self._forward_dtype
         train_pipeline_config = self.train_pipeline_config
         tile_sample_count = int(sample_indices.numel())
         tile_tstep_count = int(tstep_indices.numel())
-        local_batch_size = grids["local_batch_size"]
+        num_samples_in_window = grids["num_samples_in_window"]
 
         latents_tile = grids["latents"][sample_indices][:, tstep_indices]
         next_latents_tile = grids["next_latents"][sample_indices][:, tstep_indices]
@@ -646,7 +626,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 grids["cond"],
                 sample_indices=sample_indices,
                 tile_tstep_count=tile_tstep_count,
-                local_batch_size=local_batch_size,
+                num_samples_in_window=num_samples_in_window,
                 use_cfg=use_cfg,
             )
 
@@ -668,12 +648,11 @@ class FSDPTrainRayActor(TrainRayActor):
                 **cond,
             )[0]
 
-        cfg_batching = bool(getattr(self.args, "fsdp_cfg_batching", False))
-
         if not use_cfg:
             noise_pred_flat = _forward(pos_cond_tile)
-        elif cfg_batching:
+        elif self.args.fsdp_cfg_batching:
             joint_cond = _pack_cond_for_joint_cfg(pos_cond_tile, neg_cond_tile)
+            # forward as a batch to align with some implementations in sglang-d
             joint_out = self.model(
                 hidden_states=torch.cat([latents_input, latents_input], dim=0),
                 timestep=torch.cat([timesteps_input, timesteps_input], dim=0),
@@ -691,6 +670,8 @@ class FSDPTrainRayActor(TrainRayActor):
                 noise_pred_pos, noise_pred_neg, guidance_scale, true_cfg_scale=true_cfg_scale,
             )
 
+        # TODO: revamp and gather step logics and align with sglang-d's flow_sde_step
+        # TODO: support CPS
         _, log_prob_new_flat, _, _ = sde_step_with_logprob(
             self.scheduler,
             noise_pred_flat.float(),
@@ -701,6 +682,8 @@ class FSDPTrainRayActor(TrainRayActor):
             ).float(),
             noise_level=noise_level,
         )
+
+        # TODO: revamp and gather all loss logics
         log_prob_new = log_prob_new_flat.reshape(tile_sample_count, tile_tstep_count)
         ratio = torch.exp(log_prob_new - log_prob_old_tile)
         unclipped = -advantage_tile * ratio
@@ -724,8 +707,7 @@ class FSDPTrainRayActor(TrainRayActor):
             log_stats["log_prob_mean_abs_diff"].append(
                 torch.mean(torch.abs(log_prob_new - log_prob_old_tile)).detach()
             )
-            # Trainer noise_pred vs sgld's recorded post-CFG model_output for the
-            # same (sample, tstep). None unless --diffusion-debug-mode is set.
+            # To log model output diff, please enable --diffusion-debug-mode
             rollout_mo_window = grids.get("rollout_model_outputs")
             if rollout_mo_window is not None:
                 rollout_mo_tile = rollout_mo_window[sample_indices][:, tstep_indices]
@@ -757,16 +739,16 @@ def _tile_collated_cond(
     *,
     sample_indices: torch.Tensor,
     tile_tstep_count: int,
-    local_batch_size: int,
+    num_samples_in_window: int,
     use_cfg: bool,
 ) -> tuple[dict, dict | None]:
     """Pick `sample_indices` rows from a window-collated cond and tile each
     row `tile_tstep_count` times along the batch dim. Output dicts have
     batch = sample_indices.numel() * tile_tstep_count.
 
-    For CFG the input packs [pos_M | neg_M] along batch=2*local_batch_size;
+    For CFG the input packs [pos_M | neg_M] along batch=2*num_samples_in_window;
     pos and neg halves are extracted separately, the latter via offset
-    `+ local_batch_size`. Returns (pos, None) when use_cfg is False."""
+    `+ num_samples_in_window`. Returns (pos, None) when use_cfg is False."""
     def _tile_value(value, rows: torch.Tensor):
         if isinstance(value, torch.Tensor):
             return value.index_select(0, rows).repeat_interleave(tile_tstep_count, dim=0)
@@ -778,7 +760,7 @@ def _tile_collated_cond(
     pos = {k: _tile_value(v, sample_indices) for k, v in cond.items()}
     if not use_cfg:
         return pos, None
-    neg_indices = sample_indices + local_batch_size
+    neg_indices = sample_indices + num_samples_in_window
     neg = {k: _tile_value(v, neg_indices) for k, v in cond.items()}
     return pos, neg
 
@@ -800,8 +782,7 @@ def _pack_cond_for_joint_cfg(pos: dict, neg: dict) -> dict:
 def _cast_cond_to_dtype(cond: dict, dtype: torch.dtype) -> dict:
     """Cast floating-point tensors to the model's compute dtype; leave bool
     masks / int / list / scalar values untouched. The bool
-    encoder_hidden_states_mask must NOT be cast — diffusers reads it as a
-    bool/int mask.
+    encoder_hidden_states_mask must NOT be cast. 
     """
     out: dict = {}
     for k, v in cond.items():
@@ -841,12 +822,11 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     """
     from peft import LoraConfig, get_peft_model
 
-    targets = getattr(args, "lora_target_modules", None) or train_pipeline_config.lora_target_modules
-    init_lora_weight = getattr(args, "diffusion_init_lora_weight", "gaussian")
-    # "kaiming-uniform" is the default for PEFT's LoraConfig (passed as `True`).
-    # Other init methods: "gaussian", "olora", "pissa", "pissa_niter_N", "loftq", ...
+    # Per-model fallback when --lora-target-modules is unset (runtime inference: depends on loaded pipeline).
+    targets = args.lora_target_modules or train_pipeline_config.lora_target_modules
+    init_lora_weight = args.diffusion_init_lora_weight
     if init_lora_weight == "kaiming-uniform":
-        init_lora_weight = True
+        init_lora_weight = True # namely kaiming-uniform
     model = get_peft_model(model, LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
