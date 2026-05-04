@@ -506,19 +506,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=1,
                 help="Interval for updating the weights",
             )
-            parser.add_argument(
-                "--rollout-external",
-                action="store_true",
-                default=False,
-                help="Use external SGLang instances instead of launching them inside the framework.",
-            )
-            parser.add_argument(
-                "--rollout-external-engine-addrs",
-                type=str,
-                default=None,
-                nargs="+",
-                help="Address and ports of the external engines.",
-            )
             return parser
 
         def add_fault_tolerance_arguments(parser):
@@ -749,12 +736,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_false",
                 dest="grpo_std_normalization",
                 help="from Dr.GRPO https://arxiv.org/pdf/2503.20783",
-            )
-            parser.add_argument(
-                "--disable-rewards-normalization",
-                action="store_false",
-                dest="rewards_normalization",
-                help="Disable rewards normalization",
             )
             parser.add_argument(
                 "--globalize-reward-mean",

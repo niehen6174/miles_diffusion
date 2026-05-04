@@ -291,8 +291,6 @@ class RolloutManager:
 
     def _post_process_rewards(self, samples: list[Sample] | list[list[Sample]]):
         raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
-        if not self.args.rewards_normalization:
-            return raw_rewards, raw_rewards
 
         # --globalize-reward-mean / --globalize-reward-std are orthogonal. flow_grpo
         # pickscore_qwenimage uses per-prompt mean + global std (PerPromptStatTracker
@@ -445,22 +443,6 @@ class RolloutManager:
             rollout_data_refs.append(Box(ray.put(rollout_data)))
         return rollout_data_refs
 
-    def _split_prompt_data_by_dp(self, data: dict[str, Any], dp_size: int):
-        total = len(data["prompt"])
-        partitions = [range(i, total, dp_size) for i in range(dp_size)]
-        rollout_data_refs = []
-        for i in range(dp_size):
-            partition = list(partitions[i])
-            rollout_data = {
-                "partition": partition,
-                "prompt": [data["prompt"][j] for j in partition],
-                "sample_indices": [data["sample_indices"][j] for j in partition],
-                "total_lengths": data["total_lengths"],
-            }
-            rollout_data_refs.append(Box(ray.put(rollout_data)))
-        return rollout_data_refs
-
-
 def init_rollout_engines(args, pg, all_rollout_engines):
     if args.debug_train_only:
         return 0
@@ -521,12 +503,9 @@ def init_rollout_engines(args, pg, all_rollout_engines):
     if num_new_engines == 0:
         return num_new_engines
 
-    if args.rollout_external:
-        addr_and_ports = _allocate_rollout_engine_addr_and_ports_external(args=args, rollout_engines=rollout_engines)
-    else:
-        addr_and_ports = _allocate_rollout_engine_addr_and_ports_normal(
-            args=args, num_engines=num_engines, rollout_engines=rollout_engines
-        )
+    addr_and_ports = _allocate_rollout_engine_addr_and_ports_normal(
+        args=args, num_engines=num_engines, rollout_engines=rollout_engines
+    )
 
     # TODO: don't ray.get here to overlap train actor init with rollout engine init.
     # somehow if we don't sync here, the --debug-rollout-only mode will crash.
@@ -534,22 +513,6 @@ def init_rollout_engines(args, pg, all_rollout_engines):
     ray.get(init_handles)
 
     return num_new_engines
-
-
-def _allocate_rollout_engine_addr_and_ports_external(args, rollout_engines):
-    addr_and_ports = []
-    for rank, _ in rollout_engines:
-        addr = args.rollout_external_engine_addrs[rank]
-        [host, port] = addr.split(":")
-        addr_and_ports.append(
-            dict(
-                dist_init_addr=addr,
-                nccl_port=None,
-                host=host,
-                port=int(port),
-            )
-        )
-    return addr_and_ports
 
 
 def _allocate_rollout_engine_addr_and_ports_normal(*, args, num_engines, rollout_engines):
@@ -706,27 +669,6 @@ def compute_perf_metrics_from_samples(args, samples, rollout_time):
     log_dict["rollout_time"] = rollout_time
     if max(non_generation_time) > 0:
         log_dict |= dict_add_prefix(compute_statistics(non_generation_time), "non_generation_time/")
-
-    def token_perf(response_lengths, non_generation_time, key=""):
-        max_response_length = max(response_lengths)
-        if args.rollout_num_gpus:
-            log_dict[f"{key}tokens_per_gpu_per_sec"] = sum(response_lengths) / rollout_time / args.rollout_num_gpus
-        log_dict[f"longest_{key}sample_tokens_per_sec"] = max_response_length / rollout_time
-
-        if max(non_generation_time) == 0:
-            return
-
-        non_generation_time = [
-            t for t, length in zip(non_generation_time, response_lengths, strict=True) if length == max_response_length
-        ]
-        mean_non_generation_time = sum(non_generation_time) / len(non_generation_time)
-
-        log_dict[f"longest_{key}sample_non_generation_time"] = mean_non_generation_time
-        log_dict[f"longest_{key}sample_tokens_per_sec_without_non_generation"] = max_response_length / (
-            rollout_time - mean_non_generation_time
-        )
-
-    # token_perf
 
     return log_dict
 

@@ -147,27 +147,7 @@ class SGLangDiffusionEngine(RayActor):
         self.server_host = server_args_dict["host"]  # with [] if ipv6
         self.server_port = server_args_dict["port"]
 
-        # keep external rollout engine for debug
-        if self.args.rollout_external:
-            self._init_external(server_args_dict, external_engine_need_check_fields=external_engine_need_check_fields)
-        else:
-            self._init_normal(server_args_dict)
-
-    def _init_external(self, expect_server_args):
-        logger.info(f"Use external SGLang-Diffusion engine (rank={self.rank}, expect_server_args={expect_server_args})")
-
-        # TODO: miles diffusion support server args sanity check
-        # Now only do healthy check for generate
-        # SGL-D TODO: SGLang-D support get actual server args
-        # def _get_actual_server_args():
-        #     response = requests.get(f"http://{self.server_host}:{self.server_port}/get_server_info")
-        #     response.raise_for_status()
-        #     return response.json()
-
-        _wait_server_healthy(
-            base_url=f"http://{self.server_host}:{self.server_port}",
-            is_process_alive=lambda: True,
-        )
+        self._init_normal(server_args_dict)
 
     def _init_normal(self, server_args_dict):
         logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
@@ -290,9 +270,6 @@ class SGLangDiffusionEngine(RayActor):
         )
 
     def shutdown(self):
-        if self.args.rollout_external:
-            return
-
         logger.info(f"Shutdown engine {self.server_host}:{self.server_port}...")
         if self.node_rank == 0:
             worker_url = f"http://{self.server_host}:{self.server_port}"
@@ -330,11 +307,8 @@ class SGLangDiffusionEngine(RayActor):
         raise NotImplementedError("init_weights_update_group is not implemented in SGL-D yet")
 
     def simulate_crash(self):
-        if self.args.rollout_external or not getattr(self, "process", None):
-            logger.info(
-                "simulate_crash called but no local engine process exists (rollout_external=%s); skip kill",
-                self.args.rollout_external,
-            )
+        if not getattr(self, "process", None):
+            logger.info("simulate_crash called but no local engine process exists; skip kill")
             return
 
         logger.info(f"Simulating crash on engine {self.server_host}:{self.server_port}...")
