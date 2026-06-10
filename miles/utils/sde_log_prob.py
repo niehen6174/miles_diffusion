@@ -4,7 +4,6 @@ Adapted from flow_grpo/diffusers_patch/sd3_sde_with_logprob.py.
 """
 
 import math
-from typing import Union
 
 import torch
 
@@ -12,7 +11,7 @@ import torch
 def sde_step_with_logprob(
     scheduler,
     model_output: torch.FloatTensor,
-    timestep: Union[float, torch.FloatTensor],
+    timestep: float | torch.FloatTensor,
     sample: torch.FloatTensor,
     prev_sample: torch.FloatTensor,
     noise_level: float = 0.7,

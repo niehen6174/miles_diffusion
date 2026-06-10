@@ -380,9 +380,7 @@ class RolloutManager:
             "sample_indices": [sample.index for sample in samples],
             "prompt": [sample.prompt for sample in samples],
             # Per-sample training step indices (flow_grpo sde-window). None = train every step.
-            "sde_step_indices": [
-                (sample.train_metadata or {}).get("sde_step_indices") for sample in samples
-            ],
+            "sde_step_indices": [(sample.train_metadata or {}).get("sde_step_indices") for sample in samples],
         }
 
         return train_data
@@ -405,6 +403,7 @@ class RolloutManager:
         own namespace at least groups them in one UI section.
         """
         import wandb
+
         log_dict: dict = {}
         for media_key, samples in media_key_to_samples.items():
             images = []
@@ -449,10 +448,11 @@ class RolloutManager:
             rollout_data_refs.append(Box(ray.put(rollout_data)))
         return rollout_data_refs
 
+
 def init_rollout_engines(args, pg, all_rollout_engines):
     if args.debug_train_only:
         return 0
-    
+
     num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
     num_engines = args.rollout_num_gpus // num_gpu_per_engine
     assert len(all_rollout_engines) == num_engines
@@ -602,7 +602,7 @@ def _start_router(args):
         from miles.router.router import run_router
 
         router_args = args
-    else :
+    else:
         raise RuntimeError("Miles-diffusion only supports miles router for now")
 
     process = multiprocessing.Process(
@@ -698,5 +698,3 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
     interesting_rewards = [str(round(g[0].get_reward_value(args), 1)) for g in interesting_sample_groups]
 
     return {f"zero_std/count_{reward}": len(items) for reward, items in group_by(interesting_rewards).items()}
-
-

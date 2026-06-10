@@ -5,6 +5,7 @@ Each function has signature ``(args, sample, num_steps, seed) -> (sde, ret)``
 where ``sde`` and ``ret`` are ``list[int] | None`` (``None`` = all steps).
 Point ``--diffusion-step-strategy-path`` at any such function.
 """
+
 from __future__ import annotations
 
 from argparse import Namespace

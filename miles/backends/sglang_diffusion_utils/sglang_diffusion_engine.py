@@ -6,8 +6,8 @@ import os
 import time
 
 import requests
-from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.launch_server import kill_process_tree
+from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
 from miles.ray.ray_actor import RayActor
 from miles.utils.http_utils import get_host_info
@@ -40,8 +40,10 @@ def _scheduler_process_with_sgld_monkey_patches(*args, **kwargs):
     # before calling the real run_scheduler_process, so the DiT that's
     # constructed inside the grandchild sees the patched classes.
     from miles.backends.sglang_diffusion_utils.monkey_patches import apply_sgld_monkey_patches
+
     apply_sgld_monkey_patches()
     from sglang.multimodal_gen.runtime.managers.gpu_worker import run_scheduler_process
+
     return run_scheduler_process(*args, **kwargs)
 
 
@@ -61,9 +63,11 @@ def _launch_server_target(server_args, apply_sgld_monkey_patches: bool = False):
         # the miles qualname across to the grandchild, which applies the patch before
         # calling the real scheduler entrypoint.
         import sglang.multimodal_gen.runtime.launch_server as _ls_mod
+
         _ls_mod.run_scheduler_process = _scheduler_process_with_sgld_monkey_patches
 
     from sglang.multimodal_gen.runtime.launch_server import launch_server
+
     launch_server(server_args)
 
 
@@ -107,6 +111,7 @@ def _wait_server_healthy(base_url, is_process_alive):
                 raise Exception("Server process terminated unexpectedly.")
 
             time.sleep(2)
+
 
 class SGLangDiffusionEngine(RayActor):
     def __init__(self, args, rank: int, base_gpu_id: int | None = None):
@@ -154,10 +159,7 @@ class SGLangDiffusionEngine(RayActor):
         self._pin_to_assigned_gpu()
         apply_sgld_monkey_patches = self.args.apply_sgld_monkey_patches
         if apply_sgld_monkey_patches:
-            logger.info(
-                "Launching sglang-d with sgl-d → diffusers monkey patches "
-                "(--apply-sgld-monkey-patches)"
-            )
+            logger.info("Launching sglang-d with sgl-d → diffusers monkey patches " "(--apply-sgld-monkey-patches)")
         self.process = launch_server_process(
             ServerArgs.from_kwargs(**server_args_dict),
             apply_sgld_monkey_patches=apply_sgld_monkey_patches,
@@ -275,12 +277,10 @@ class SGLangDiffusionEngine(RayActor):
             worker_url = f"http://{self.server_host}:{self.server_port}"
             response = None
             if self.args.use_miles_router:
-                response = requests.post(
-                    f"http://{self.router_ip}:{self.router_port}/remove_worker?url={worker_url}"
-                )
+                response = requests.post(f"http://{self.router_ip}:{self.router_port}/remove_worker?url={worker_url}")
             else:
                 # SGL-D router TODO: shutdown for sglang-diffusion router
-                logger.warning(f"Failed to fetch workers list or remove worker: now only support miles_router")
+                logger.warning("Failed to fetch workers list or remove worker: now only support miles_router")
 
             if response is not None:
                 response.raise_for_status()
