@@ -36,7 +36,7 @@ class DiffusionUpdateWeight(abc.ABC):
         self.weight_version = 0
         # Name of the sglang-d pipeline module to target. Defaults to "transformer",
         # which is the DiT component for diffusers-based pipelines.
-        self.target_module = getattr(args, "diffusion_target_module", "transformer")
+        self.target_module = args.update_weight_target_module
 
     @abc.abstractmethod
     def connect_rollout_engines(
