@@ -6,7 +6,7 @@
 #   rollout_batch_size=16 prompts × n_samples=16 = 256 items/rollout
 #   num_steps_per_rollout=2 → 128 items/optim step (global)
 #   ÷ 2 train gpus = 64 items/rank/optim step (same as 4-GPU script)
-#   tile = (sample=4, tstep=2) = 8 cells, 8 tiles/rank/optim step.
+#   --micro-batch-size-sample 4 --micro-batch-size-tstep 2 (legacy 2D compat).
 #
 # Other knobs (matching flow_grpo qwen-image OCR):
 #   lr=3e-4, adam_beta2=0.999, weight_decay=1e-4, max_grad_norm=1.0,

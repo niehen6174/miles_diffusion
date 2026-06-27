@@ -104,11 +104,18 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
         self,
         per_sample_cond_kwargs: list[dict],
         device: torch.device,
+        pad_to_len: int | None = None,
     ) -> dict:
         """Pad+stack per-sample encoder_hidden_states to (M, max_len, D), build
         the corresponding (M, max_len) bool mask from txt_seq_lens, and
         list-concat img_shapes / txt_seq_lens. Mask isn't transmitted from
         rollout — it is fully derivable from txt_seq_lens which is.
+
+        When ``pad_to_len`` is given, pad to ``max(max(seq_lens), pad_to_len)``
+        instead of the batch-local max. This lets the flat-train-pair trainer
+        reproduce the legacy window-collated padding width (the old code path
+        padded once over the whole optimizer window, so all tiles shared one
+        seq_len), which is required for bitwise parity at bf16.
         """
         seq_lens: list[int] = []
         encs: list[torch.Tensor] = []
@@ -130,6 +137,8 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
             img_shapes.append(shapes[0])
 
         max_len = max(seq_lens)
+        if pad_to_len is not None:
+            max_len = max(max_len, int(pad_to_len))
         padded = []
         for enc, _L in zip(encs, seq_lens, strict=False):
             cur_len = enc.shape[1]
@@ -152,6 +161,11 @@ class QwenImageTrainPipelineConfig(TrainPipelineConfig):
             "txt_seq_lens": seq_lens,
             "img_shapes": img_shapes,
         }
+
+    def maybe_legacy_window_pad_len(self, conds: list) -> int | None:
+        # LEGACY 2D parity: reproduce the legacy whole-window cond pad width. TODO: remove with legacy 2D path.
+        lens = [int(c.txt_seq_lens[0]) for c in conds if c is not None and c.txt_seq_lens]
+        return max(lens) if lens else None
 
     def cfg_combine(
         self,

@@ -24,6 +24,7 @@ from miles.utils.metric_utils import compute_rollout_step, compute_statistics, d
 from miles.utils.misc import load_function
 from miles.utils.ray_utils import Box
 from miles.utils.tracking_utils import init_tracking
+from miles.utils.train_data_utils import RolloutTrainDataConverter, TrainDataDPSplitter, reorder_train_pairs_for_tiling
 from miles.utils.types import Sample
 
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -69,6 +70,8 @@ class RolloutManager:
             if self.args.custom_convert_samples_to_train_data_path is not None
             else None
         )
+        self.train_data_converter = RolloutTrainDataConverter()
+        self.train_data_dp_splitter = TrainDataDPSplitter()
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
@@ -150,7 +153,27 @@ class RolloutManager:
         _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
         data = self._convert_samples_to_train_data(data)
         logger.info("RolloutManager generate done: rollout_id=%s", rollout_id)
-        return self._split_train_data_by_dp(data, self.train_parallel_config["dp_size"])
+        dp_size = self.train_parallel_config["dp_size"]
+        # Legacy 2D compat: strided DP split + tile reorder reproduce the legacy
+        # tiles bit-for-bit; otherwise the native 1D contiguous split.
+        if self.args.micro_batch_size_sample is not None:
+            shards = self.train_data_dp_splitter.split_by_dp(data, dp_size, mode="baseline_stride")
+            shards = [
+                {
+                    **shard,
+                    "train_data": reorder_train_pairs_for_tiling(
+                        shard["train_data"],
+                        num_optim_steps_per_rollout=self.args.num_steps_per_rollout,
+                        sample_microbatch=self.args.micro_batch_size_sample,
+                        tstep_microbatch=self.args.micro_batch_size_tstep,
+                        iter_order=self.args.diffusion_train_iter_order,
+                    ),
+                }
+                for shard in shards
+            ]
+        else:
+            shards = self.train_data_dp_splitter.split_by_dp(data, dp_size)
+        return [Box(ray.put(shard)) for shard in shards]
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
@@ -364,26 +387,7 @@ class RolloutManager:
                 reward_key=self.args.reward_key,
             )
 
-        train_data = {
-            # RL
-            "rewards": rewards,
-            "raw_reward": raw_rewards,
-            "rollout_log_probs": [sample.rollout_log_probs for sample in samples],
-            # Rollout outputs — training side maps these to model-specific forward() args
-            "denoising_env": [sample.denoising_env for sample in samples],
-            "dit_trajectory": [sample.dit_trajectory for sample in samples],
-            # Optional per-step rollout debug tensors (when rollout_debug_mode=True):
-            # rollout_variance_noises / rollout_prev_sample_means / rollout_noise_std_devs /
-            # rollout_model_outputs — shape [T, ...], used for train/rollout alignment checks.
-            "rollout_debug_tensors": [sample.rollout_debug_tensors for sample in samples],
-            # Bookkeeping
-            "sample_indices": [sample.index for sample in samples],
-            "prompt": [sample.prompt for sample in samples],
-            # Per-sample training step indices (flow_grpo sde-window). None = train every step.
-            "sde_step_indices": [(sample.train_metadata or {}).get("sde_step_indices") for sample in samples],
-        }
-
-        return train_data
+        return self.train_data_converter.convert_samples(samples, rewards, raw_rewards)
 
     def _log_images(
         self,
@@ -426,27 +430,6 @@ class RolloutManager:
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
-
-    def _split_train_data_by_dp(self, data, dp_size):
-        """Split the train data by data parallel size."""
-        num_samples = len(data["sample_indices"])
-        partitions = [range(i, num_samples, dp_size) for i in range(dp_size)]
-
-        # Keys to partition (per-sample lists)
-        partition_keys = [k for k in data if isinstance(data[k], list) and len(data[k]) == num_samples]
-        # Keys to broadcast (global, not per-sample)
-        broadcast_keys = [k for k in data if k not in partition_keys]
-
-        rollout_data_refs = []
-        for i in range(dp_size):
-            rollout_data = {}
-            partition = partitions[i]
-            for key in partition_keys:
-                rollout_data[key] = [data[key][j] for j in partition]
-            for key in broadcast_keys:
-                rollout_data[key] = data[key]
-            rollout_data_refs.append(Box(ray.put(rollout_data)))
-        return rollout_data_refs
 
 
 def init_rollout_engines(args, pg, all_rollout_engines):

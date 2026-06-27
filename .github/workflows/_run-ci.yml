@@ -120,7 +120,7 @@ jobs:
             IPython aiohttp anthropic build compressed-tensors einops fastapi \
             gguf interegular jsonschema llguidance mistral_common modelscope \
             msgspec ninja nvidia-ml-py openai openai-harmony orjson outlines \
-            partial_json_parser prometheus-client psutil py-spy pydantic \
+            partial_json_parser prometheus-client psutil py-spy pybase64 pydantic \
             python-multipart pyzmq scipy sentencepiece setproctitle soundfile \
             tiktoken timm torchvision uvicorn uvloop watchfiles xgrammar
           # sglang's memory_pool_host.py unconditionally imports sgl_kernel

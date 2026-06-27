@@ -1,0 +1,223 @@
+{
+  "meta": {
+    "description": "Real legacy TrainRayActor grid-tile group-batch membership, produced by executing origin/main _run_optim_window verbatim with the 2-GPU OCR baseline config. Each cell is [sample_index, sde_step]. The refactored compat pipeline (baseline_stride DP split + build_microbatch_schedule, micro_batch_size=8) must reproduce every tile exactly.",
+    "legacy_provenance": {
+      "ref": "radixark/miles_diffusion@a48476c (origin/main)",
+      "dp_stride": "miles/ray/rollout.py:433",
+      "tile_iteration": "miles/backends/fsdp_utils/actor.py:_run_optim_window (executed live)",
+      "cell_order": "miles/backends/fsdp_utils/actor.py:_forward_tile reshape (sample-major)"
+    },
+    "config": {
+      "dp_size": 2,
+      "num_samples": 512,
+      "num_steps_per_rollout": 2,
+      "sde_window_size": 2,
+      "sde_step_indices": [
+        3,
+        4
+      ],
+      "sample_microbatch": 4,
+      "tstep_microbatch": 2,
+      "iter_order": "sample_major",
+      "micro_batch_size": 8
+    },
+    "expected_microbatches_per_optim_step": 32
+  },
+  "tiles": [
+    {
+      "rank": 0,
+      "optim_step": 0,
+      "tile_index": 0,
+      "cells": [
+        [
+          0,
+          3
+        ],
+        [
+          0,
+          4
+        ],
+        [
+          2,
+          3
+        ],
+        [
+          2,
+          4
+        ],
+        [
+          4,
+          3
+        ],
+        [
+          4,
+          4
+        ],
+        [
+          6,
+          3
+        ],
+        [
+          6,
+          4
+        ]
+      ]
+    },
+    {
+      "rank": 0,
+      "optim_step": 0,
+      "tile_index": 31,
+      "cells": [
+        [
+          248,
+          3
+        ],
+        [
+          248,
+          4
+        ],
+        [
+          250,
+          3
+        ],
+        [
+          250,
+          4
+        ],
+        [
+          252,
+          3
+        ],
+        [
+          252,
+          4
+        ],
+        [
+          254,
+          3
+        ],
+        [
+          254,
+          4
+        ]
+      ]
+    },
+    {
+      "rank": 1,
+      "optim_step": 0,
+      "tile_index": 0,
+      "cells": [
+        [
+          1,
+          3
+        ],
+        [
+          1,
+          4
+        ],
+        [
+          3,
+          3
+        ],
+        [
+          3,
+          4
+        ],
+        [
+          5,
+          3
+        ],
+        [
+          5,
+          4
+        ],
+        [
+          7,
+          3
+        ],
+        [
+          7,
+          4
+        ]
+      ]
+    },
+    {
+      "rank": 0,
+      "optim_step": 1,
+      "tile_index": 0,
+      "cells": [
+        [
+          256,
+          3
+        ],
+        [
+          256,
+          4
+        ],
+        [
+          258,
+          3
+        ],
+        [
+          258,
+          4
+        ],
+        [
+          260,
+          3
+        ],
+        [
+          260,
+          4
+        ],
+        [
+          262,
+          3
+        ],
+        [
+          262,
+          4
+        ]
+      ]
+    },
+    {
+      "rank": 1,
+      "optim_step": 1,
+      "tile_index": 31,
+      "cells": [
+        [
+          505,
+          3
+        ],
+        [
+          505,
+          4
+        ],
+        [
+          507,
+          3
+        ],
+        [
+          507,
+          4
+        ],
+        [
+          509,
+          3
+        ],
+        [
+          509,
+          4
+        ],
+        [
+          511,
+          3
+        ],
+        [
+          511,
+          4
+        ]
+      ]
+    }
+  ]
+}

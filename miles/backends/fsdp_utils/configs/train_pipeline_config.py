@@ -1,14 +1,13 @@
 """Training-side pipeline config for diffusion models.
 
-Mirrors the spirit of sglang-d's PipelineConfig but only contains the
-model-specific logic needed for the GRPO training loop:
-  - How to prepare conditioning kwargs from DenoisingEnv
-  - How to unpack trajectories
-  - How to apply CFG (with or without rescale)
-  - How to expand conditioning for timestep batching
+Model-specific logic for the GRPO training forward (after rollout has built
+train-pair dicts):
+  - prepare_cond_kwargs / collate / expand for DenoisingEnv
+  - CFG combine
+  - FSDP preprocess hooks
 
-Each model (QwenImage, SD3, Flux, ...) subclasses TrainPipelineConfig
-and overrides the relevant methods.
+Trajectory unpacking for train-pair construction lives in
+``miles.utils.train_data_utils.RolloutTrainDataConverter``.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ from __future__ import annotations
 import abc
 
 import torch
-from miles.utils.types import CondKwargs, DiTTrajectory
+from miles.utils.types import CondKwargs
 
 
 _REGISTRY: dict[str, type[TrainPipelineConfig]] = {}
@@ -51,22 +50,6 @@ class TrainPipelineConfig(abc.ABC):
     needs_timestep_scaling: bool = True
     optimizer_state_allowed_missing: list[str] = []
 
-    def prepare_trajectory(
-        self,
-        traj: DiTTrajectory,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Unpack trajectory into (latents, next_latents, timesteps).
-
-        Default handles the common (T+1, ...) layout. Override for models
-        with different trajectory formats.
-        """
-        all_latents = traj.latents.to(device, dtype=torch.float32)
-        latents = all_latents[:-1]
-        next_latents = all_latents[1:]
-        timesteps = traj.timesteps.to(device, dtype=torch.float32)
-        return latents, next_latents, timesteps
-
     @abc.abstractmethod
     def prepare_cond_kwargs(
         self,
@@ -75,36 +58,32 @@ class TrainPipelineConfig(abc.ABC):
     ) -> dict:
         """Convert CondKwargs to model-specific forward() kwargs."""
 
-    def expand_cond_for_timestep_batch(
-        self,
-        cond_kwargs: dict,
-        batch_size: int,
-    ) -> dict:
-        """Expand per-sample conditioning to a timestep batch."""
-        out = {}
-        for k, v in cond_kwargs.items():
-            if isinstance(v, torch.Tensor):
-                out[k] = v.expand(batch_size, *v.shape[1:]) if v.shape[0] == 1 else v
-            elif isinstance(v, list):
-                out[k] = v * batch_size if len(v) == 1 else v
-            else:
-                out[k] = v
-        return out
-
     def collate_cond_for_sample_batch(
         self,
         per_sample_cond_kwargs: list[dict],
         device: torch.device,
+        pad_to_len: int | None = None,
     ) -> dict:
         """Stack a list of per-sample cond_kwargs (output of prepare_cond_kwargs)
         into a single batched dict suitable for one DiT forward over M samples.
 
         Model-specific because variable-length text embeds need padding + mask.
         Default: naive concat along batch dim, only valid when shapes match.
+
+        ``pad_to_len`` is part of the contract so the trainer can uniformly ask
+        every config to pad text to a shared width (the legacy window-wide
+        seq_len) for bitwise grouping parity. Configs that do variable-length
+        padding (e.g. Qwen-Image) must honor it; configs that concat
+        fixed-length embeds (SD3, Wan2.2, LTX) accept and ignore it.
         """
         raise NotImplementedError(
-            "Must implement collate_cond_for_sample_batch to enable --micro-batch-size-sample in fsdp training"
+            "Must implement collate_cond_for_sample_batch to enable micro-batch-size > 1 in fsdp training"
         )
+
+    def maybe_legacy_window_pad_len(self, conds: list) -> int | None:
+        """LEGACY 2D parity: seq_len to pad text embeds to (whole-window max), or None for
+        fixed-length-cond models. Qwen-Image overrides. TODO: remove with the legacy 2D path."""
+        return None
 
     @abc.abstractmethod
     def cfg_combine(

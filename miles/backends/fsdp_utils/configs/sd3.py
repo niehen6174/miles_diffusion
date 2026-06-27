@@ -48,6 +48,7 @@ class SD3TrainPipelineConfig(TrainPipelineConfig):
         self,
         per_sample_cond_kwargs: list[dict],
         device: torch.device,
+        pad_to_len: int | None = None,  # accepted for interface parity; SD3 concats fixed-length embeds
     ) -> dict:
         out = {}
         for key in per_sample_cond_kwargs[0]:
