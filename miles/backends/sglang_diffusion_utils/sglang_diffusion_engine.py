@@ -323,6 +323,9 @@ def _compute_server_args(args, host, port, nccl_port):
         "warmup": False,
     }
 
+    if getattr(args, "diffusion_flow_shift", None) is not None:
+        kwargs["flow_shift"] = float(args.diffusion_flow_shift)
+
     # Forward every `args.sglang_<field>` the user set via --sglang-* CLI for
     # ServerArgs fields not already hardcoded above. Picks up ulysses_degree /
     # ring_degree / dp_size / etc. without listing each one.

@@ -271,6 +271,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Number of diffusion inference steps for rollout.",
             )
             parser.add_argument(
+                "--diffusion-flow-shift",
+                type=float,
+                default=None,
+                help=(
+                    "Flow-matching shift for the generation schedule. Passed to the rollout "
+                    "engine at launch as its pipeline-config flow_shift override, so both "
+                    "the rollout and eval schedulers use it. None = engine default "
+                    "(12.0 for Wan2.2-T2V-A14B)."
+                ),
+            )
+            parser.add_argument(
                 "--diffusion-microgroup-size",
                 type=int,
                 default=1,
@@ -283,10 +294,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
             )
             parser.add_argument(
+                "--diffusion-output-num-frames",
+                type=int,
+                default=1,
+                help="Requested decoded video frame count for diffusion video rollout. Wan2.2 MVP uses 1.",
+            )
+            parser.add_argument(
                 "--diffusion-guidance-scale",
                 type=float,
                 default=4.0,
                 help="Guidance scale for diffusion rollout.",
+            )
+            parser.add_argument(
+                "--diffusion-guidance-scale-2",
+                type=float,
+                default=None,
+                help="Optional Wan2.2 low-noise guidance scale for diffusion rollout.",
             )
             parser.add_argument(
                 "--diffusion-noise-level",
@@ -343,6 +366,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="'lo,hi' bounds for the SDE window start (inclusive, exclusive). "
                 "Defaults to [0, num_inference_steps].",
+            )
+            parser.add_argument(
+                "--diffusion-sde-candidate-steps",
+                type=str,
+                default=None,
+                help="Comma-separated step indices forming the SDE window candidate "
+                "set for step strategies that draw from a list (e.g. '1,2,3'). "
+                "Required by epoch_global_window: valid indices depend on the schedule, so "
+                "there is no safe default.",
             )
             parser.add_argument(
                 "--diffusion-step-strategy-path",
@@ -409,8 +441,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default="transformer",
                 help=(
-                    "Name of the sglang-d pipeline module to push updated weights to. "
-                    "Defaults to 'transformer', the DiT component for diffusers-based pipelines."
+                    "Comma-separated names of the sglang-d pipeline modules to train and push "
+                    "updated weights to. Defaults to 'transformer', the DiT component for "
+                    "diffusers-based pipelines. For dual-expert models (Wan2.2) pass "
+                    "'transformer,transformer_2' to train both the high- and low-noise DiT."
                 ),
             )
             parser.add_argument(
@@ -1275,6 +1309,16 @@ def miles_validate_args(args):
 
     if args.eval_reward_key is None:
         args.eval_reward_key = args.reward_key
+
+    args.update_weight_target_modules = [
+        name.strip() for name in args.update_weight_target_module.split(",") if name.strip()
+    ]
+    if not args.update_weight_target_modules:
+        raise ValueError(
+            f"--update-weight-target-module must name at least one module, got {args.update_weight_target_module!r}"
+        )
+    if len(set(args.update_weight_target_modules)) != len(args.update_weight_target_modules):
+        raise ValueError(f"--update-weight-target-module has duplicates: {args.update_weight_target_module!r}")
 
     if args.diffusion_log_image_interval < 1:
         raise ValueError(f"diffusion_log_image_interval must be >= 1, got {args.diffusion_log_image_interval}")
