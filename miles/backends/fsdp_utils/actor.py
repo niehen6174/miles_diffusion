@@ -1,3 +1,4 @@
+import functools
 import logging
 from argparse import Namespace
 from collections import defaultdict
@@ -28,12 +29,43 @@ from miles.utils.train_data_utils import (
     validate_same_microbatch_counts_across_dp,
 )
 from . import checkpoint
+from .arguments import deterministic_capable_flash_fns
 from .configs.train_pipeline_config import get_train_pipeline_config
 from .diffusion_update_weight_utils import DiffusionUpdateWeightFromTensor, DiffusionUpdateWeightFromTensorLoRA
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_deterministic_training(args: Namespace) -> None:
+    """Train-actor deterministic mode. NCCL/CUBLAS env is set at spawn (actor_group);
+    here we set the torch-runtime knobs."""
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # warn_only=False is required: SDPA's deterministic backward is gated on
+    # !warnOnly (aten attention_backward.cu), so warn_only=True is a no-op on native.
+    torch.use_deterministic_algorithms(True, warn_only=False)
+
+    # flash-attn is a separate CUDA extension torch's flag can't reach; patch it on.
+    backend = args.fsdp_attention_backend
+    if backend is not None and "flash" in backend.lower():
+        _enable_deterministic_flash_attention()
+
+
+def _enable_deterministic_flash_attention() -> None:
+    """Patch diffusers' flash globals to run deterministic=True (backward only;
+    forward unchanged). Idempotent."""
+    import diffusers.models.attention_dispatch as ad
+
+    if getattr(ad, "_miles_deterministic_flash_patched", False):
+        return
+
+    names = deterministic_capable_flash_fns()
+    for name in names:
+        setattr(ad, name, functools.partial(getattr(ad, name), deterministic=True))
+    ad._miles_deterministic_flash_patched = True
+    logger.info("Enabled deterministic flash attention backward for: %s", ", ".join(names))
 
 
 class FSDPTrainRayActor(TrainRayActor):
@@ -46,6 +78,9 @@ class FSDPTrainRayActor(TrainRayActor):
     @with_defer(lambda: Timer().start("train_wait"))
     def init(self, args: Namespace, role: str, with_ref: bool = False) -> int:  # type: ignore[override]
         super().init(args, role, with_ref)
+
+        if args.deterministic_mode:
+            _enable_deterministic_training(args)
 
         self.parallel_state = create_fsdp_parallel_state(args)
         torch.manual_seed(args.seed)
@@ -91,6 +126,9 @@ class FSDPTrainRayActor(TrainRayActor):
                 raw_models[component] = sub_model
             self.scheduler = pipeline.scheduler
             del pipeline
+
+        if args.fsdp_attention_backend is not None:
+            model.set_attention_backend(args.fsdp_attention_backend)
 
         self.train_pipeline_config = get_train_pipeline_config(args.diffusion_model)
 

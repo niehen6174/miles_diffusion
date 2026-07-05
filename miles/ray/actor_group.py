@@ -55,6 +55,15 @@ class RayTrainGroup:
             "NVTE_FP8_BLOCK_SCALING_FP32_SCALES": "1",
             **self.args.train_env_vars,
         }
+
+        if getattr(self.args, "deterministic_mode", False):
+            # Must be in the process env at spawn: NCCL reads it at
+            # init_process_group and cuBLAS at first matmul, both before the actor
+            # runs. torch-runtime knobs are set in the actor instead.
+            env_vars.setdefault("NCCL_DETERMINISTIC", "1")
+            # :4096:8 (not :16:8) so cuBLASLT isn't workspace-limited; both are
+            # deterministic, this one avoids the perf hit. ~32 MiB/handle.
+            env_vars.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         # Let Ray set CUDA_VISIBLE_DEVICES per actor to avoid all ranks
         # sharing GPU0. (Old --diffusion-train branch removed.)
 

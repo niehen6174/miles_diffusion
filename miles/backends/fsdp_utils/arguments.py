@@ -32,6 +32,10 @@ class FSDPArgs:
 
     attn_implementation: str = "flash_attention_2"
 
+    # DiT attention backend, passed to diffusers set_attention_backend (e.g.
+    # "flash", "sage", "native"). None keeps the diffusers default.
+    fsdp_attention_backend: str | None = None
+
     # Logging
     wandb_project: str = "miles-fsdp"
     wandb_run_name: str | None = None
@@ -49,7 +53,9 @@ class FSDPArgs:
         "gloo"  # CPU backend for FSDP CPU offload (e.g., "gloo"). Set to None to disable hybrid backend.
     )
 
-    deterministic_mode: bool = False  # This name must be the same as Megatron's
+    # Train-actor deterministic mode; see validate_attention_args for the backend
+    # support matrix. Name kept identical to Megatron's.
+    deterministic_mode: bool = False
 
     # Context Parallelism
     context_parallel_size: int = 1  # Context Parallelism size
@@ -84,6 +90,68 @@ def parse_fsdp_cli(extra_args_provider=None):
     return args
 
 
+# Deterministic-mode attention support matrix — KEEP IN SYNC. torch's flag only
+# governs torch-native ops, so an unlisted custom kernel runs nondeterministic
+# silently under deterministic mode.
+#   native / _native_*  (SDPA)      : torch's flag (needs warn_only=False)
+#   flash* / _flash_3*  (flash-attn): patch deterministic= on (flag can't reach it)
+#   sage / xformers / flex / aiter  : opaque to torch, no hook -> reject (validate)
+
+# diffusers dispatches flash through these module globals (FA3 op reads them too).
+_FLASH_ATTN_DISPATCH_FNS = (
+    "flash_attn_func",
+    "flash_attn_varlen_func",
+    "flash_attn_3_func",
+    "flash_attn_3_varlen_func",
+)
+
+
+def deterministic_capable_flash_fns():
+    """diffusers flash entry points whose signature accepts a `deterministic` arg."""
+    import inspect
+
+    import diffusers.models.attention_dispatch as ad
+
+    out = []
+    for name in _FLASH_ATTN_DISPATCH_FNS:
+        fn = getattr(ad, name, None)
+        if fn is None:
+            continue
+        try:
+            if "deterministic" in inspect.signature(fn).parameters:
+                out.append(name)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def validate_attention_args(args):
+    """Fail fast (driver-side, before any actor launches) on deterministic-mode misconfig."""
+    if not getattr(args, "deterministic_mode", False):
+        return
+    backend = args.fsdp_attention_backend
+    name = "" if backend is None else backend.lower()
+    # torch SDPA (diffusers default / native): torch's global determinism covers it.
+    if backend is None or "native" in name:
+        return
+    # flash-attn: torch's global flag can't reach it; we patch its deterministic= on.
+    if "flash" in name:
+        if not deterministic_capable_flash_fns():
+            raise RuntimeError(
+                "deterministic_mode with a flash attention backend, but no diffusers "
+                "flash entry point exposes a deterministic argument (is flash-attn "
+                "installed and recent enough?)."
+            )
+        return
+    # Anything else is a custom kernel we can neither cover via torch nor patch.
+    raise ValueError(
+        f"deterministic_mode cannot guarantee a deterministic backward for attention "
+        f"backend '{backend}': it is a custom kernel opaque to "
+        f"torch.use_deterministic_algorithms with no deterministic hook here. Use a "
+        f"flash (flash/_flash_3) or native (SDPA) backend."
+    )
+
+
 def load_fsdp_args(extra_args_provider=None):
     args = parse_fsdp_cli(extra_args_provider)
     if args.config:
@@ -92,4 +160,5 @@ def load_fsdp_args(extra_args_provider=None):
         for k, v in data.items():
             if not hasattr(args, k):
                 setattr(args, k, v)
+    validate_attention_args(args)
     return args
