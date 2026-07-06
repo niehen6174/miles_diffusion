@@ -127,13 +127,14 @@ class FSDPTrainRayActor(TrainRayActor):
             self.scheduler = pipeline.scheduler
             del pipeline
 
-        if args.fsdp_attention_backend is not None:
-            model.set_attention_backend(args.fsdp_attention_backend)
-
         self.train_pipeline_config = get_train_pipeline_config(args.diffusion_model)
 
         self.models: dict[str, torch.nn.Module] = {}
         for component, model in raw_models.items():
+            # per raw component (wan2.2 has two transformers), before LoRA/FSDP wrap
+            if args.fsdp_attention_backend is not None:
+                model.set_attention_backend(args.fsdp_attention_backend)
+
             if args.use_lora:
                 model = apply_lora(model, args, self.train_pipeline_config)
 
