@@ -168,6 +168,9 @@ class RolloutTrainDataConverter:
         latents = all_latents[:-1]
         next_latents = all_latents[1:]
         timesteps = traj.timesteps.to(device, dtype=torch.float32)
+        # The step after the last has no recorded timestep -> terminal (σ=0, timestep 0),
+        # so the SDE step reads σ_next from the actual next rollout timestep, not a lookup.
+        next_timesteps = torch.cat([timesteps[1:], timesteps.new_zeros(1)])
 
         sde_idx = (sample.train_metadata or {}).get("sde_step_indices")
         assert sde_idx is not None, "SDE step indices are required for training"
@@ -176,6 +179,9 @@ class RolloutTrainDataConverter:
             "latent": latents[idx],
             "next_latent": next_latents[idx],
             "timestep": timesteps[idx],
+            # Carry the actual next-step timestep so the SDE step resolves σ_next from a
+            # rollout value, never assuming train/rollout scheduler positional alignment.
+            "next_timestep": next_timesteps[idx],
             "log_prob_old": rollout_log_probs[idx],
         }, idx
 

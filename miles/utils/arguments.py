@@ -366,6 +366,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="rollout_sde_type for POST /rollout/generate.",
             )
             parser.add_argument(
+                "--sde-step-backend-path",
+                type=str,
+                default=None,
+                help="SdeStepBackend class path; default = flow-matching SDE over scheduler sigmas.",
+            )
+            parser.add_argument(
                 "--diffusion-sde-window-size",
                 type=int,
                 default=0,
