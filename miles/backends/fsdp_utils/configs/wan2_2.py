@@ -8,8 +8,9 @@ from miles.utils.types import CondKwargs
 from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_config
 
 
-@register_train_pipeline_config("Wan2.2-T2V-A14B", "Wan-AI/Wan2.2-T2V-A14B")
+@register_train_pipeline_config("wan2_2")
 class Wan2_2TrainPipelineConfig(TrainPipelineConfig):
+    hf_ckpt_name_patterns = ("wan2.2", "wan-2.2")
     # High-noise expert ("transformer") handles t >= boundary, low-noise expert
     # ("transformer_2") the rest.
     boundary_ratio = 0.875

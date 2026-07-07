@@ -259,6 +259,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="HuggingFace model id for diffusion rollout.",
             )
             parser.add_argument(
+                "--train-pipeline-config-path",
+                type=str,
+                default=None,
+                help="TrainPipelineConfig class path; default resolved from the model family.",
+            )
+            parser.add_argument(
+                "--model-backend-path",
+                type=str,
+                default=None,
+                help="Model loading function path; default from the family config.",
+            )
+            parser.add_argument(
                 "--diffusion-device",
                 type=str,
                 default=None,
@@ -1322,6 +1334,26 @@ def miles_validate_args(args):
 
     if args.diffusion_log_image_interval < 1:
         raise ValueError(f"diffusion_log_image_interval must be >= 1, got {args.diffusion_log_image_interval}")
+
+    if getattr(args, "diffusion_model", None):
+        from miles.utils.misc import load_function
+
+        if args.train_pipeline_config_path is not None:
+            # Explicit config path IS the identity (custom classes never need registering).
+            cfg_cls = load_function(args.train_pipeline_config_path)
+            args.diffusion_model_family = None
+        else:
+            from miles.backends.fsdp_utils.configs.train_pipeline_config import (
+                get_train_pipeline_config_cls,
+                resolve_diffusion_model_family,
+            )
+
+            args.diffusion_model_family = resolve_diffusion_model_family(args.diffusion_model)
+            cfg_cls = get_train_pipeline_config_cls(args.diffusion_model_family)
+            args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__qualname__}"
+        if args.model_backend_path is None:
+            args.model_backend_path = cfg_cls.model_backend_path
+        cfg_cls.validate_args(args)
 
     if args.dump_details is not None:
         args.save_debug_rollout_data = f"{args.dump_details}/rollout_data/{{rollout_id}}.pt"

@@ -7,7 +7,6 @@ from contextlib import nullcontext
 import ray
 import torch
 import torch.distributed as dist
-from diffusers import DiffusionPipeline
 
 import miles.backends.fsdp_utils.configs.qwen_image  # noqa: F401 — register pipeline config
 import miles.backends.fsdp_utils.configs.sd3  # noqa: F401 — register pipeline config
@@ -30,7 +29,6 @@ from miles.utils.train_data_utils import (
 )
 from . import checkpoint
 from .arguments import deterministic_capable_flash_fns
-from .configs.train_pipeline_config import get_train_pipeline_config
 from .diffusion_update_weight_utils import DiffusionUpdateWeightFromTensor, DiffusionUpdateWeightFromTensorLoRA
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
@@ -106,28 +104,13 @@ class FSDPTrainRayActor(TrainRayActor):
         self._master_dtype = _resolve_dtype(args.fsdp_master_dtype)
         self._forward_dtype = _resolve_dtype(args.diffusion_forward_dtype)
 
-        with self._get_init_weight_context_manager():
-            pipeline = DiffusionPipeline.from_pretrained(
-                self.args.hf_checkpoint,
-                torch_dtype=self._master_dtype,
-                trust_remote_code=True,
-                text_encoder=None,
-                vae=None,
-                tokenizer=None,
-            )
-            raw_models: dict[str, torch.nn.Module] = {}
-            for component in args.update_weight_target_modules:
-                sub_model = getattr(pipeline, component, None)
-                if sub_model is None:
-                    raise ValueError(
-                        f"--update-weight-target-module: pipeline {self.args.hf_checkpoint} "
-                        f"has no component '{component}'"
-                    )
-                raw_models[component] = sub_model
-            self.scheduler = pipeline.scheduler
-            del pipeline
+        from miles.utils.misc import load_function
 
-        self.train_pipeline_config = get_train_pipeline_config(args.diffusion_model)
+        self.train_pipeline_config = load_function(args.train_pipeline_config_path)()
+        self.model_backend = load_function(args.model_backend_path)(self.train_pipeline_config)
+        raw_models, self.scheduler = self.model_backend.load_models_and_scheduler(
+            args, master_dtype=self._master_dtype
+        )
 
         self.models: dict[str, torch.nn.Module] = {}
         for component, model in raw_models.items():
@@ -141,7 +124,7 @@ class FSDPTrainRayActor(TrainRayActor):
             model.train()
 
             if args.gradient_checkpointing:
-                model.enable_gradient_checkpointing()
+                self.model_backend.enable_gradient_checkpointing(model)
 
             model.to(torch.cuda.current_device())
 
@@ -152,6 +135,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 mesh=self.parallel_state.dp_mesh,
                 cpu_offload=self.args.fsdp_cpu_offload,
                 args=self.args,
+                no_split_modules=self.model_backend.fsdp_no_split_modules(model),
             )
             self.models[component] = model
         # Force a sync to ensure sharding is complete and old memory is freed.
@@ -257,20 +241,6 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.weight_updater.update_weights()
         clear_memory()
-
-    def _get_init_weight_context_manager(self):
-        """Return a context manager for model initialization.
-
-        Non-rank-0 ranks use accelerate's ``init_empty_weights`` (params on
-        meta device, no allocation). Rank 0 uses ``torch.device("cpu")``
-        (already a context manager since PyTorch 1.X — sets default device
-        for tensor construction inside the block).
-        """
-        from accelerate import init_empty_weights
-
-        if dist.get_rank() != 0:
-            return init_empty_weights()
-        return torch.device("cpu")
 
     def _gather_and_log_metrics(self, rollout_id: int, log_dict: dict[str, float], step: int) -> None:
         """Reduce per-rank scalars and log."""
@@ -568,35 +538,19 @@ class FSDPTrainRayActor(TrainRayActor):
         latents_input = latents_microbatch.to(forward_dtype)
         timesteps_input = timesteps_for_model.to(forward_dtype)
 
-        def _forward(cond: dict) -> torch.Tensor:
-            return model(
-                hidden_states=latents_input,
-                timestep=timesteps_input,
-                return_dict=False,
-                **cond,
-            )[0]
-
         def _compute_noise_pred(disable_adapter: bool = False) -> torch.Tensor:
             adapter_ctx = model.disable_adapter() if disable_adapter else nullcontext()
             with adapter_ctx:
-                if not use_cfg:
-                    return _forward(pos_cond_microbatch)
-                if cfg_batching:
-                    # forward pos+neg as one joint batch to align with sglang-d
-                    joint_out = model(
-                        hidden_states=torch.cat([latents_input, latents_input], dim=0),
-                        timestep=torch.cat([timesteps_input, timesteps_input], dim=0),
-                        return_dict=False,
-                        **joint_cond,
-                    )[0]
-                    noise_pred_pos, noise_pred_neg = joint_out.chunk(2, dim=0)
-                else:
-                    noise_pred_pos = _forward(pos_cond_microbatch)
-                    noise_pred_neg = _forward(neg_cond_microbatch)
-                return train_pipeline_config.cfg_combine(
-                    noise_pred_pos,
-                    noise_pred_neg,
-                    guidance_scale,
+                return train_pipeline_config.compute_noise_pred(
+                    model=model,
+                    latents_input=latents_input,
+                    timesteps_input=timesteps_input,
+                    pos_cond=pos_cond_microbatch,
+                    neg_cond=neg_cond_microbatch,
+                    joint_cond=joint_cond,
+                    use_cfg=use_cfg,
+                    cfg_batching=cfg_batching,
+                    guidance_scale=guidance_scale,
                     true_cfg_scale=true_cfg_scale,
                 )
 
@@ -752,12 +706,12 @@ def apply_lora(model: torch.nn.Module, args: Namespace, train_pipeline_config) -
     return model
 
 
-def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None):
+def apply_fsdp2(model, mesh=None, cpu_offload=False, args=None, no_split_modules=None):
     from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, fully_shard
 
     offload_policy = CPUOffloadPolicy() if cpu_offload else None
 
-    layer_cls_to_wrap = model._no_split_modules
+    layer_cls_to_wrap = no_split_modules if no_split_modules is not None else model._no_split_modules
     assert len(layer_cls_to_wrap) > 0 and layer_cls_to_wrap[0] is not None
 
     modules = [module for name, module in model.named_modules() if module.__class__.__name__ in layer_cls_to_wrap]

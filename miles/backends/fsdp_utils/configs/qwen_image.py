@@ -59,8 +59,9 @@ def _rebuild_pos_embed_freqs_on_cuda(model) -> None:
             cvf.cache_clear()
 
 
-@register_train_pipeline_config("Qwen/Qwen-Image")
+@register_train_pipeline_config("qwen_image")
 class QwenImageTrainPipelineConfig(TrainPipelineConfig):
+    hf_ckpt_name_patterns = ("qwen-image",)
 
     lora_target_modules = [
         "to_q",

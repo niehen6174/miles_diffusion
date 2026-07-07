@@ -9,9 +9,11 @@ from miles.utils.types import CondKwargs
 from .train_pipeline_config import TrainPipelineConfig, register_train_pipeline_config
 
 
-@register_train_pipeline_config("stabilityai/stable-diffusion-3")
+@register_train_pipeline_config("sd3")
 class SD3TrainPipelineConfig(TrainPipelineConfig):
     """Training-side adapters for diffusers SD3Transformer2DModel."""
+
+    hf_ckpt_name_patterns = ("stable-diffusion-3", "sd3")
 
     lora_target_modules = [
         "attn.to_q",
