@@ -115,7 +115,7 @@ class FSDPTrainRayActor(TrainRayActor):
         for component, model in raw_models.items():
             # per raw component (wan2.2 has two transformers), before LoRA/FSDP wrap
             if args.fsdp_attention_backend is not None:
-                model.set_attention_backend(args.fsdp_attention_backend)
+                self.model_backend.set_attention_backend(model, args.fsdp_attention_backend)
 
             if args.use_lora:
                 model = apply_lora(model, args, self.train_pipeline_config)

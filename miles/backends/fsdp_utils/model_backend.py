@@ -42,6 +42,10 @@ class ModelBackend(abc.ABC):
         """Block class names FSDP wraps; default = the model's own declaration."""
         return model._no_split_modules
 
+    def set_attention_backend(self, model: torch.nn.Module, backend: str) -> None:
+        """Select the DiT attention backend; default = the diffusers protocol method."""
+        model.set_attention_backend(backend)
+
 
 class DiffusersModelBackend(ModelBackend):
     """Load trainable components from a diffusers pipeline checkpoint."""
