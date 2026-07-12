@@ -3,12 +3,11 @@
 #
 # Usage:
 #   CUDA_VISIBLE_DEVICES=2,3 WANDB_API_KEY=<key> \
-#     nohup bash scripts/run-diffusion-grpo-sd3-pickscore-sglang.sh \
+#     nohup bash scripts/run-diffusion-grpo-sd3-ocr-sglang.sh \
 #       > logs/sd3_ocr_sglang_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 #
 # GPU layout (default, override with CUDA_VISIBLE_DEVICES):
-#   slot 0 (e.g. physical GPU 2) → FSDP actor
-#   slot 1 (e.g. physical GPU 3) → sglang-diffusion rollout engine
+#   2-GPU colocate: FSDP DP=2 + 2 sglang rollout engines (time-multiplexed per GPU).
 #
 # The script kills only processes whose cwd is inside this Miles workspace,
 # so co-located experiments on other GPUs are not disturbed.
@@ -100,17 +99,17 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --rollout-batch-size 8 \
   --n-samples-per-prompt 16 \
   --num-rollout "${NUM_ROLLOUT}" \
-  --micro-batch-size-sample 8 \
+  --micro-batch-size-sample 16 \
   --micro-batch-size-tstep 5 \
+  --diffusion-microgroup-size 8 \
   --gradient-checkpointing \
-  --actor-num-gpus-per-node 1 \
-  --rollout-num-gpus 1 \
+  --actor-num-gpus-per-node 2 \
+  --rollout-num-gpus 2 \
   --rollout-num-gpus-per-engine 1 \
   --num-gpus-per-node 2 \
-  --no-offload-rollout \
   --colocate \
   --use-miles-router \
-  --sglang-server-concurrency 4 \
+  --sglang-server-concurrency 8 \
   --use-lora \
   --lora-rank 32 \
   --lora-alpha 64 \
@@ -129,6 +128,9 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --sglang-dit-precision fp16 \
   --sglang-vae-slicing \
   --diffusion-num-steps 10 \
+  --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
+  --diffusion-sde-window-size 10 \
+  --diffusion-sde-window-range 0,10 \
   --diffusion-eval-num-steps 40 \
   --update-weight-buffer-size 2147483648 \
   --diffusion-guidance-scale 4.5 \
