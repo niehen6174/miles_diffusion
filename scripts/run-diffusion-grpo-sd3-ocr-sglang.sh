@@ -111,6 +111,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --use-miles-router \
   --sglang-server-concurrency 8 \
   --use-lora \
+  --lora-ipc-weight-sync \
   --lora-rank 32 \
   --lora-alpha 64 \
   --diffusion-init-lora-weight gaussian \
