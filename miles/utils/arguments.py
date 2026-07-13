@@ -1040,6 +1040,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Override LoRA target modules. Default: per-model from TrainPipelineConfig.",
             )
             parser.add_argument(
+                "--lora-ipc-weight-sync",
+                action="store_true",
+                default=False,
+                help=(
+                    "Sync only lora_A/lora_B to rollout via IPC with weight_update_mode=lora_merge "
+                    "(requires matching sglang-d LoRAPipeline support)."
+                ),
+            )
+            parser.add_argument(
                 "--diffusion-init-lora-weight",
                 type=str,
                 default="gaussian",
