@@ -246,6 +246,9 @@ class SGLangDiffusionEngine(RayActor):
         load_format: str | None = None,
         target_modules: list[str] | None = None,
         weight_version: str | None = None,
+        weight_update_mode: str | None = None,
+        lora_alpha: int | None = None,
+        lora_rank: int | None = None,
     ):
         """
         Update model weights from tensor data. The HTTP server will only post meta data, and the real weights will be copied directly from GPUs.
@@ -261,6 +264,12 @@ class SGLangDiffusionEngine(RayActor):
             payload["target_modules"] = target_modules
         if weight_version is not None:
             payload["weight_version"] = weight_version
+        if weight_update_mode is not None:
+            payload["weight_update_mode"] = weight_update_mode
+        if lora_alpha is not None:
+            payload["lora_alpha"] = lora_alpha
+        if lora_rank is not None:
+            payload["lora_rank"] = lora_rank
         return self._make_request(
             "update_weights_from_tensor",
             payload,
@@ -308,6 +317,11 @@ class SGLangDiffusionEngine(RayActor):
 
 
 def _compute_server_args(args, host, port, nccl_port):
+    from miles.backends.fsdp_utils.configs.train_pipeline_config import (
+        get_train_pipeline_config_cls,
+        resolve_diffusion_model_family,
+    )
+
     # Only set fields SGL-D's ServerArgs actually accepts. GPU pinning is done
     # in `_init_normal` via CUDA_VISIBLE_DEVICES — SGL-D has no base_gpu_id arg.
     kwargs = {
@@ -338,5 +352,10 @@ def _compute_server_args(args, host, port, nccl_port):
     for attr in dataclasses.fields(ServerArgs):
         if hasattr(args, f"sglang_{attr.name}") and attr.name not in kwargs:
             kwargs[attr.name] = getattr(args, f"sglang_{attr.name}")
+
+    if getattr(args, "use_lora", False) and getattr(args, "lora_ipc_weight_sync", False):
+        family = resolve_diffusion_model_family(args.diffusion_model)
+        train_pipeline_config = get_train_pipeline_config_cls(family)()
+        kwargs["lora_target_modules"] = args.lora_target_modules or train_pipeline_config.lora_target_modules
 
     return kwargs
