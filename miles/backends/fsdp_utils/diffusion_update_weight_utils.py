@@ -1,8 +1,9 @@
 import abc
 import logging
 import os
+import re
 from argparse import Namespace
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import ray
 import torch
@@ -32,6 +33,70 @@ except ImportError as _e:
 
 
 logger = logging.getLogger(__name__)
+
+LORA_IPC_WEIGHT_UPDATE_MODE = "lora_merge"
+
+
+class PeftLoRAKeyMapper:
+    """Map PEFT LoRA state-dict keys to sglang-d tensor names for IPC sync."""
+
+    _LORA_KEY_RE = re.compile(r"\.lora_([AB])(?:\.[^.]+)?(?:\.weight)?$")
+    _PEFT_PREFIX = "base_model.model."
+
+    @classmethod
+    def is_lora_key(cls, name: str) -> bool:
+        return ".lora_A" in name or ".lora_B" in name
+
+    @classmethod
+    def to_sgld_name(cls, name: str) -> str | None:
+        """Map a PEFT state-dict key to sglang-d LoRA tensor name."""
+        if not cls.is_lora_key(name):
+            return None
+
+        stripped = name
+        if stripped.startswith(cls._PEFT_PREFIX):
+            stripped = stripped[len(cls._PEFT_PREFIX) :]
+
+        match = cls._LORA_KEY_RE.search(stripped)
+        if match is None:
+            return None
+
+        layer_prefix = stripped[: match.start()]
+        ab = match.group(1)
+        return f"{layer_prefix}.lora_{ab}"
+
+    @classmethod
+    def collect_sgld_names(cls, state_dict: Mapping[str, torch.Tensor]) -> set[str]:
+        names: set[str] = set()
+        for key in state_dict:
+            sgld_name = cls.to_sgld_name(key)
+            if sgld_name is not None:
+                names.add(sgld_name)
+        return names
+
+    @classmethod
+    def collect_layer_prefixes(cls, state_dict: Mapping[str, torch.Tensor]) -> set[str]:
+        return {name.rsplit(".lora_", 1)[0] for name in cls.collect_sgld_names(state_dict)}
+
+    @classmethod
+    def summarize_mapping(
+        cls,
+        state_dict: Mapping[str, torch.Tensor],
+    ) -> tuple[int, int, list[str], list[str]]:
+        """Return (num_tensors, num_layers, sample_layer_prefixes, unmapped_peft_keys)."""
+        sgld_names: list[str] = []
+        unmapped: list[str] = []
+        for key in state_dict:
+            if not cls.is_lora_key(key):
+                continue
+            sgld_name = cls.to_sgld_name(key)
+            if sgld_name is None:
+                unmapped.append(key)
+            else:
+                sgld_names.append(sgld_name)
+        layer_prefixes = {name.rsplit(".lora_", 1)[0] for name in sgld_names}
+        sample = sorted(layer_prefixes)[:5]
+        return len(sgld_names), len(layer_prefixes), sample, unmapped
 
 
 class DiffusionUpdateWeight(abc.ABC):
@@ -88,12 +153,23 @@ class DiffusionUpdateWeight(abc.ABC):
             self.wait_and_update_bucket_weights(bucket, target_module)
             del bucket
 
-    def wait_and_update_bucket_weights(self, bucket, target_module: str):
+    def wait_and_update_bucket_weights(self, bucket, target_module: str, weight_update_mode=None):
         bucket = [(name, param.wait()) if hasattr(param, "wait") else (name, param) for name, param in bucket]
-        self.update_bucket_weights(bucket, target_module, weight_version=self.weight_version)
+        self.update_bucket_weights(
+            bucket,
+            target_module,
+            weight_version=self.weight_version,
+            weight_update_mode=weight_update_mode,
+        )
 
     @abc.abstractmethod
-    def update_bucket_weights(self, named_tensors, target_module: str, weight_version=None) -> None:
+    def update_bucket_weights(
+        self,
+        named_tensors,
+        target_module: str,
+        weight_version=None,
+        weight_update_mode: str | None = None,
+    ) -> None:
         pass
 
 
@@ -123,7 +199,13 @@ class DiffusionUpdateWeightFromTensor(DiffusionUpdateWeight):
                 # Calculate TP rank within this SGLang engine group.
                 self.tp_rank = dist.get_rank() - start_rank
 
-    def update_bucket_weights(self, named_tensors, target_module: str, weight_version=None) -> None:
+    def update_bucket_weights(
+        self,
+        named_tensors,
+        target_module: str,
+        weight_version=None,
+        weight_update_mode: str | None = None,
+    ) -> None:
         monkey_patch_torch_reductions()
         logger.info("Using flattened tensor bucket (diffusion updater, module=%s)", target_module)
         named_tensors_by_dtypes = {}
@@ -173,6 +255,10 @@ class DiffusionUpdateWeightFromTensor(DiffusionUpdateWeight):
                     "target_modules": [target_module],
                     "weight_version": str(weight_version),
                 }
+                if weight_update_mode is not None:
+                    kwargs["weight_update_mode"] = weight_update_mode
+                    kwargs["lora_alpha"] = self.args.lora_alpha
+                    kwargs["lora_rank"] = self.args.lora_rank
                 ref = self._ipc_engine.update_weights_from_tensor.remote(**kwargs)
                 ray.get(ref)
 
@@ -322,3 +408,78 @@ class DiffusionUpdateWeightFromTensorLoRA(DiffusionUpdateWeightFromTensor):
         all_equal = all(s == first_sum for _, s in engine_sums)
         pretty = "  ".join(f"eng{idx}={s[:16] if isinstance(s, str) else s}" for idx, s in engine_sums)
         logger.warning(f"[weight_sync verify v{self.weight_version} cross-engine] " f"all_equal={all_equal}  {pretty}")
+
+
+class DiffusionUpdateWeightFromTensorLoRAIPC(DiffusionUpdateWeightFromTensor):
+    """Push only lora_A/lora_B tensors; rollout merges locally via weight_update_mode=lora_merge."""
+
+    def update_weights(self) -> None:
+        self.weight_version += 1
+        for target_module, model in self.models.items():
+            bucket: list[tuple[str, torch.Tensor]] = []
+            bucket_size = 0
+            num_lora_keys = 0
+            unmapped_keys: list[str] = []
+
+            for name, param in model.state_dict().items():
+                if not PeftLoRAKeyMapper.is_lora_key(name):
+                    continue
+                sgld_name = PeftLoRAKeyMapper.to_sgld_name(name)
+                if sgld_name is None:
+                    unmapped_keys.append(name)
+                    continue
+
+                param = param.cuda()
+                if isinstance(param, DTensor):
+                    param = param.redistribute(
+                        placements=[Replicate()] * param.device_mesh.ndim,
+                        async_op=True,
+                    ).to_local()
+
+                sz = param.numel() * param.element_size()
+                if bucket and bucket_size + sz >= self.args.update_weight_buffer_size:
+                    self.wait_and_update_bucket_weights(
+                        bucket,
+                        target_module,
+                        weight_update_mode=LORA_IPC_WEIGHT_UPDATE_MODE,
+                    )
+                    bucket, bucket_size = [], 0
+
+                bucket.append((sgld_name, param))
+                bucket_size += sz
+                num_lora_keys += 1
+
+            if bucket:
+                self.wait_and_update_bucket_weights(
+                    bucket,
+                    target_module,
+                    weight_update_mode=LORA_IPC_WEIGHT_UPDATE_MODE,
+                )
+
+            if self.weight_version <= 2 and dist.get_rank() == 0:
+                _, num_layers, sample_layers, _ = PeftLoRAKeyMapper.summarize_mapping(model.state_dict())
+                logger.info(
+                    "LoRA IPC weight sync v%s [%s]: pushed %d lora tensors, " "%d layer prefixes (unmapped=%d)",
+                    self.weight_version,
+                    target_module,
+                    num_lora_keys,
+                    num_layers,
+                    len(unmapped_keys),
+                )
+                if sample_layers:
+                    logger.info(
+                        "LoRA IPC [%s] sample layer prefixes: %s",
+                        target_module,
+                        sample_layers,
+                    )
+                if unmapped_keys:
+                    logger.warning(
+                        "LoRA IPC unmapped PEFT keys [%s] (first 5): %s",
+                        target_module,
+                        unmapped_keys[:5],
+                    )
+                if num_lora_keys == 0:
+                    logger.error(
+                        "LoRA IPC [%s]: no lora tensors found in training state_dict",
+                        target_module,
+                    )
