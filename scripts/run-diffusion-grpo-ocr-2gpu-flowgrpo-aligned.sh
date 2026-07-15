@@ -63,6 +63,7 @@ hf download --repo-type dataset rockdu/miles-diffusion-datasets \
   --num-gpus-per-node 2 \
   --colocate \
   --use-lora \
+  --lora-ipc-weight-sync \
   --lora-rank 64 \
   --lora-alpha 128 \
   --diffusion-init-lora-weight gaussian \

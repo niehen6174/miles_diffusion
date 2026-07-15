@@ -29,7 +29,11 @@ from miles.utils.train_data_utils import (
 )
 from . import checkpoint
 from .arguments import deterministic_capable_flash_fns
-from .diffusion_update_weight_utils import DiffusionUpdateWeightFromTensor, DiffusionUpdateWeightFromTensorLoRA
+from .diffusion_update_weight_utils import (
+    DiffusionUpdateWeightFromTensor,
+    DiffusionUpdateWeightFromTensorLoRA,
+    DiffusionUpdateWeightFromTensorLoRAIPC,
+)
 from .lr_scheduler import get_lr_scheduler
 from .parallel import create_fsdp_parallel_state
 
@@ -186,6 +190,8 @@ class FSDPTrainRayActor(TrainRayActor):
         # sglang-d now supports /update_weights_from_tensor (PR #20464).
         if self.args.debug_train_only:
             self.weight_updater = None
+        elif self.args.use_lora and self.args.lora_ipc_weight_sync:
+            self.weight_updater = DiffusionUpdateWeightFromTensorLoRAIPC(self.args, self.models)
         elif self.args.use_lora:
             self.weight_updater = DiffusionUpdateWeightFromTensorLoRA(self.args, self.models)
         else:
