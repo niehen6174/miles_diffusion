@@ -300,11 +300,6 @@ class SGLangDiffusionEngine(RayActor):
 
 
 def _compute_server_args(args, host, port, nccl_port):
-    from miles.backends.fsdp_utils.configs.train_pipeline_config import (
-        get_train_pipeline_config_cls,
-        resolve_diffusion_model_family,
-    )
-
     # Only set fields SGL-D's ServerArgs actually accepts. GPU pinning is done
     # in `_init_normal` via CUDA_VISIBLE_DEVICES — SGL-D has no base_gpu_id arg.
     kwargs = {
@@ -332,9 +327,7 @@ def _compute_server_args(args, host, port, nccl_port):
             kwargs[attr.name] = getattr(args, f"sglang_{attr.name}")
 
     if getattr(args, "use_lora", False) and getattr(args, "lora_ipc_weight_sync", False):
-        family = resolve_diffusion_model_family(args.diffusion_model)
-        train_pipeline_config = get_train_pipeline_config_cls(family)()
-        kwargs["lora_target_modules"] = args.lora_target_modules or train_pipeline_config.lora_target_modules
+        kwargs["lora_target_modules"] = args.lora_target_modules
     # dit_precision / vae_precision are PipelineConfig fields, not ServerArgs, so forward them explicitly (only when changed from the class default, to avoid clobbering a subclass override).
     from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
 

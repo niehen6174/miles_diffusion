@@ -1369,6 +1369,17 @@ def miles_validate_args(args):
         if args.model_backend_path is None:
             args.model_backend_path = cfg_cls.model_backend_path
         cfg_cls.validate_args(args)
+        if args.use_lora and args.lora_target_modules is None:
+            args.lora_target_modules = list(cfg_cls.lora_target_modules)
+
+    if getattr(args, "lora_ipc_weight_sync", False):
+        if not args.use_lora:
+            raise ValueError("--lora-ipc-weight-sync requires --use-lora")
+        if not args.lora_target_modules:
+            raise ValueError(
+                "--lora-ipc-weight-sync requires LoRA target modules; "
+                "set --diffusion-model (for per-model defaults) or --lora-target-modules."
+            )
 
     if args.dump_details is not None:
         args.save_debug_rollout_data = f"{args.dump_details}/rollout_data/{{rollout_id}}.pt"
