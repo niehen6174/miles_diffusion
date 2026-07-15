@@ -62,14 +62,15 @@ def build_rollout_sampling_params(
             }
         )
 
-    output_num_frames = getattr(args, "diffusion_output_num_frames", None)
-    if output_num_frames is not None:
-        sampling_params["num_frames"] = int(output_num_frames)
+    if args.diffusion_output_num_frames is not None:
+        sampling_params["num_frames"] = int(args.diffusion_output_num_frames)
 
-    guidance_scale_2 = getattr(args, "diffusion_guidance_scale_2", None)
-    if guidance_scale_2 is not None:
+    if args.diffusion_fps is not None:
+        sampling_params["fps"] = int(args.diffusion_fps)
+
+    if args.diffusion_guidance_scale_2 is not None:
         extra_sampling_params = dict(extra_sampling_params or {})
-        extra_sampling_params["guidance_scale_2"] = float(guidance_scale_2)
+        extra_sampling_params["guidance_scale_2"] = float(args.diffusion_guidance_scale_2)
 
     if extra_sampling_params:
         sampling_params["extra_sampling_params"] = extra_sampling_params
@@ -85,8 +86,8 @@ def build_rollout_generate_payload(
 ) -> dict[str, Any]:
     """Build full JSON payload for ``POST /rollout/generate`` (``RolloutImageRequest``)."""
     sampling_params["prompt"] = prompt
-    if sampling_params["negative_prompt"] is None:
-        sampling_params["negative_prompt"] = " "  # FlowGRPO default
+    if sampling_params.get("negative_prompt") is None and float(sampling_params.get("guidance_scale", 1.0)) != 1.0:
+        sampling_params["negative_prompt"] = " "  # FlowGRPO default when CFG is on
     sampling_params["num_outputs_per_prompt"] = num_outputs_per_prompt
     return sampling_params
 
@@ -163,6 +164,9 @@ async def generate_microgroup(
             int(sampling_params["num_inference_steps"]),
             int(sampling_params["seed"]),
         )
+        # Keep return_step_indices None: sgl-d only filters trajectory latents by it, not
+        # log_probs, and the trainer needs the full trajectory for (x_i, x_{i+1}) pairs.
+        assert return_indices is None, "rollout_return_step_indices must be None for now"
         sampling_params["rollout_sde_step_indices"] = sde_indices
         sampling_params["rollout_return_step_indices"] = return_indices
     else:

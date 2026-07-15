@@ -8,7 +8,7 @@
 #          mixed precision (master fp32 / forward bf16).
 #   LoRA: r=64, alpha=128, init=gaussian, self-attn + cross-attn + FFN of both DiTs.
 #
-# SDE schedule: epoch_global_window draws ONE step per rollout (shared across the
+# SDE schedule: epoch_global_random_choice draws ONE step per rollout (shared across the
 #   batch) from --diffusion-sde-candidate-steps 1,2,3. At flow_shift=3.0 the
 #   dual-expert boundary is t=875: steps 1,2 train "transformer" (high-noise),
 #   step 3 trains "transformer_2" (low-noise), so both experts get gradient
@@ -114,8 +114,8 @@ WAN_LORA_TARGET_MODULES=(
   --diffusion-height 480 \
   --diffusion-width 480 \
   --diffusion-flow-shift 3.0 \
-  --diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_window \
-  --diffusion-sde-window-size 1 \
+  --diffusion-step-strategy-path miles.rollout.step_strategy_hub.epoch_global_random_choice \
+  --diffusion-num-sde-steps 1 \
   --diffusion-sde-candidate-steps 1,2,3 \
   --diffusion-debug-mode \
   --save "${SAVE_DIR}" \

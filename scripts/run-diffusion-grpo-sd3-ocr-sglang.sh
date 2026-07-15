@@ -130,7 +130,7 @@ python -u "${ROOT_DIR}/train_diffusion.py" \
   --sglang-vae-slicing \
   --diffusion-num-steps 10 \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
-  --diffusion-sde-window-size 10 \
+  --diffusion-num-sde-steps 10 \
   --diffusion-sde-window-range 0,10 \
   --diffusion-eval-num-steps 40 \
   --update-weight-buffer-size 2147483648 \

@@ -24,9 +24,9 @@ def sde_window(
     to the window for loss / backprop. Keeping the full trajectory avoids the
     sglang-d-side trailing ``x_final`` aliasing issue when the window ends before
     the last denoising step."""
-    window_size = int(args.diffusion_sde_window_size)
+    window_size = int(args.diffusion_num_sde_steps)
     if window_size <= 0:
-        raise ValueError("sde_window requires --diffusion-sde-window-size > 0")
+        raise ValueError("sde_window requires --diffusion-num-sde-steps > 0")
     range_raw = args.diffusion_sde_window_range
     if range_raw:
         parts = [int(x) for x in str(range_raw).split(",")]
@@ -38,30 +38,28 @@ def sde_window(
     if not 0 <= lo < hi <= num_steps:
         raise ValueError(f"--diffusion-sde-window-range [{lo},{hi}) out of range for a {num_steps}-step schedule")
     if window_size > hi - lo:
-        raise ValueError(f"--diffusion-sde-window-size {window_size} does not fit in window range [{lo},{hi})")
+        raise ValueError(f"--diffusion-num-sde-steps {window_size} does not fit in window range [{lo},{hi})")
     rng = np.random.default_rng(seed)
     start = int(rng.integers(lo, hi - window_size + 1))
     indices = list(range(start, start + window_size))
     return indices, None
 
 
-def epoch_global_window(
+def epoch_global_random_choice(
     args: Namespace, sample: Sample, num_steps: int, seed: int
 ) -> tuple[list[int] | None, list[int] | None]:
-    """Per-epoch global SDE window: draw ``--diffusion-sde-window-size``
-    indices from the candidate set once per epoch, so every sample in an
-    epoch trains the same window."""
+    """Per-epoch global random SDE subset: draw ``--diffusion-num-sde-steps`` candidate
+    steps at random once per epoch (every sample in the epoch shares them), returned
+    in ascending step order (matches the wan2.2 recipe)."""
     candidates = _sde_candidate_steps(args, num_steps)
-    window_size = int(args.diffusion_sde_window_size)
-    if window_size <= 0:
-        raise ValueError("epoch_global_window requires --diffusion-sde-window-size > 0")
-    if window_size >= len(candidates):
+    num_sde_steps = int(args.diffusion_num_sde_steps)
+    if num_sde_steps <= 0:
+        raise ValueError("epoch_global_random_choice requires --diffusion-num-sde-steps > 0")
+    if num_sde_steps >= len(candidates):
         return sorted(candidates), None
-
-    group_index = int(getattr(sample, "group_index", 0) or 0)
-    epoch = group_index // int(args.rollout_batch_size)
+    epoch = int(sample.group_index or 0) // int(args.rollout_batch_size)
     generator = torch.Generator().manual_seed(epoch + int(args.rollout_seed))
-    selected = torch.randperm(len(candidates), generator=generator)[:window_size]
+    selected = torch.randperm(len(candidates), generator=generator)[:num_sde_steps]
     return sorted(candidates[i] for i in selected.tolist()), None
 
 
@@ -69,7 +67,7 @@ def _sde_candidate_steps(args: Namespace, num_steps: int) -> list[int]:
     raw = getattr(args, "diffusion_sde_candidate_steps", None)
     if raw is None:
         raise ValueError(
-            "epoch_global_window requires --diffusion-sde-candidate-steps "
+            "epoch_global_random_choice requires --diffusion-sde-candidate-steps "
             "(e.g. '1,2,3'); which indices are valid depends on the "
             "num-steps/flow-shift schedule; there is no safe default"
         )

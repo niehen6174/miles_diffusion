@@ -143,9 +143,7 @@ class SGLangDiffusionEngine(RayActor):
         self._pin_to_assigned_gpu()
         from miles.backends.sglang_diffusion_utils.monkey_patches import ROLLOUT_PATCH_GROUPS_ENV
 
-        patch_groups = []
-        if getattr(self.args, "apply_sgld_monkey_patches", False):
-            patch_groups.append("sgld")
+        patch_groups = self.args.rollout_patch_groups
         if patch_groups:
             os.environ[ROLLOUT_PATCH_GROUPS_ENV] = ",".join(patch_groups)
             logger.info("Launching sglang-d with rollout patch groups: %s", patch_groups)

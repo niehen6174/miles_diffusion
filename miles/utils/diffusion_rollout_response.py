@@ -7,6 +7,7 @@ from typing import Any
 import ray
 import torch
 
+from miles.utils.processing_utils import fhwc_to_cfhw
 from miles.utils.types import (
     CondKwargs,
     DenoisingEnv,
@@ -23,6 +24,7 @@ __all__ = [
 
 # Prefer these keys for mapping dict ``rollout_log_probs`` → ``Sample.rollout_log_probs``.
 _ROLLOUT_LOG_PROB_PRIMARY_KEYS = ("log_prob", "log_probs", "total", "per_step")
+_IMAGE_CHANNEL_COUNTS = (1, 3, 4)
 
 
 def _default_deserialize_func(value: Any) -> torch.Tensor | None:
@@ -31,6 +33,37 @@ def _default_deserialize_func(value: Any) -> torch.Tensor | None:
     if isinstance(value, dict) and value.get("__tensor__"):
         return decode_tensor_base64(value["data"]).detach().cpu()
     raise TypeError(f"Cannot deserialize {type(value)}")
+
+
+def _normalize_generated_output(tensor: torch.Tensor | None) -> torch.Tensor | None:
+    """Normalize a per-sample image/video to ``[C, F, H, W]``."""
+    if tensor is None:
+        return None
+    if tensor.ndim not in (3, 4):
+        raise ValueError("generated_output must be CHW/HWC or CFHW/FHWC, " f"got shape {tuple(tensor.shape)}")
+
+    first_is_channel = tensor.shape[0] in _IMAGE_CHANNEL_COUNTS
+    last_is_channel = tensor.shape[-1] in _IMAGE_CHANNEL_COUNTS
+    if first_is_channel and last_is_channel:
+        raise ValueError(
+            "generated_output layout is ambiguous because both the first and last "
+            f"dimensions look like channels: {tuple(tensor.shape)}"
+        )
+
+    # TODO: Move this canonicalization into sglang-diffusion's rollout response
+    # builder once it exposes an explicit generated-output layout contract.
+    if first_is_channel:
+        canonical = tensor.unsqueeze(1) if tensor.ndim == 3 else tensor
+    elif last_is_channel:
+        fhwc = tensor.unsqueeze(0) if tensor.ndim == 3 else tensor
+        canonical = fhwc_to_cfhw(fhwc)
+    else:
+        raise ValueError(
+            "generated_output has no recognizable channel dimension; expected "
+            f"1, 3, or 4 channels, got shape {tuple(tensor.shape)}"
+        )
+
+    return canonical.contiguous()
 
 
 def _deserialize_rollout_log_probs(
@@ -78,8 +111,15 @@ def _parse_cond_kwargs(
         freqs_cis=[deserialize_func(x) for x in data.get("freqs_cis", [])],
         img_shapes=data.get("img_shapes"),
         encoder_hidden_states=_parse_tensor_or_list(
-            data.get("encoder_hidden_states"), deserialize_func=deserialize_func
+            data.get("encoder_hidden_states") or data.get("context"),
+            deserialize_func=deserialize_func,
         ),
+        audio_encoder_hidden_states=_parse_tensor_or_list(
+            data.get("audio_encoder_hidden_states"),
+            deserialize_func=deserialize_func,
+        ),
+        encoder_attention_mask=deserialize_func(data.get("encoder_attention_mask")),
+        audio_encoder_attention_mask=deserialize_func(data.get("audio_encoder_attention_mask")),
         pooled_projections=_parse_tensor_or_list(data.get("pooled_projections"), deserialize_func=deserialize_func),
     )
 
@@ -141,7 +181,7 @@ def apply_rollout_image_response(
     if "seed" in body:
         sample.seed = int(body["seed"])
 
-    sample.generated_output = deserialize_func(body.get("generated_output"))
+    sample.generated_output = _normalize_generated_output(deserialize_func(body.get("generated_output")))
     sample.rollout_log_probs = _deserialize_rollout_log_probs(
         body.get("rollout_log_probs"), deserialize_func=deserialize_func
     )

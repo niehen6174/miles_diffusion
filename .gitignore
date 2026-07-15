@@ -177,6 +177,8 @@ settings.json
 .pypirc
 
 wandb/
+logs/
+dist/
 outputs/
 data/
 local/

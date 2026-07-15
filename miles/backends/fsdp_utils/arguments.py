@@ -132,7 +132,8 @@ def validate_attention_args(args):
     backend = args.fsdp_attention_backend
     name = "" if backend is None else backend.lower()
     # torch SDPA (diffusers default / native): torch's global determinism covers it.
-    if backend is None or "native" in name:
+    # 'math' backends (torch SDPBackend.MATH semantics) are deterministic by construction.
+    if backend is None or "native" in name or "math" in name:
         return
     # flash-attn: torch's global flag can't reach it; we patch its deterministic= on.
     if "flash" in name:

@@ -96,7 +96,7 @@ hf download --repo-type dataset rockdu/miles-diffusion-datasets \
   --diffusion-true-cfg-scale 4.0 \
   --diffusion-noise-level 1.2 \
   --diffusion-step-strategy-path miles.rollout.step_strategy_hub.sde_window \
-  --diffusion-sde-window-size 2 \
+  --diffusion-num-sde-steps 2 \
   --diffusion-sde-window-range 3,5 \
   --diffusion-debug-mode \
   --apply-sgld-monkey-patches \

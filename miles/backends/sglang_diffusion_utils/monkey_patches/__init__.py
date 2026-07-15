@@ -8,6 +8,7 @@ those groups before model construction.
 - ``sgld``: diffusers / SD3 op parity (RMSNorm, LayerNormScaleShift, MulAdd,
   USPAttention, ...). Op-layer patches: they apply to every sgl-d DiT built
   from these generic classes.
+- ``ltx``:  LTX rollout cond kwargs + AV cross-off (video-only train parity).
 
 Patch modules are imported inside ``apply_*`` only, so CPU-only Ray actors
 can import this package without pulling sglang triton kernels. Adding a
@@ -52,6 +53,17 @@ def apply_sgld_monkey_patches() -> None:
     patch_mul_add.apply()
     patch_usp_attention.apply()
     patch_qk_norm_rope.apply()
+
+
+@register_rollout_patch_group("ltx")
+def apply_ltx2_rollout_patches() -> None:
+    from miles.backends.sglang_diffusion_utils.monkey_patches import (
+        patch_ltx2_disable_av_cross,
+        patch_ltx2_rollout_cond_kwargs,
+    )
+
+    patch_ltx2_rollout_cond_kwargs.apply()
+    patch_ltx2_disable_av_cross.apply()
 
 
 def apply_env_selected_rollout_patches() -> None:

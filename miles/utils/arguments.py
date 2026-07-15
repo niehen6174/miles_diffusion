@@ -306,6 +306,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Number of diffusion inference steps for eval rollout. Defaults to diffusion-num-steps.",
             )
             parser.add_argument(
+                "--diffusion-fps",
+                type=float,
+                default=None,
+                help="Video fps for rollout; None for image models.",
+            )
+            parser.add_argument(
                 "--diffusion-output-num-frames",
                 type=int,
                 default=1,
@@ -372,11 +378,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="SdeStepBackend class path; default = flow-matching SDE over scheduler sigmas.",
             )
             parser.add_argument(
-                "--diffusion-sde-window-size",
+                "--diffusion-num-sde-steps",
                 type=int,
                 default=0,
-                help="flow_grpo-style random SDE window; 0 disables. Steps outside "
-                "the window run ODE and are not returned for training.",
+                help="Number of SDE steps to train on; 0 disables. The step strategy "
+                "interprets it (contiguous window for sde_window, random subset for "
+                "epoch_global_random_choice subset); other steps run ODE and are not returned.",
             )
             parser.add_argument(
                 "--diffusion-sde-window-range",
@@ -391,7 +398,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Comma-separated step indices forming the SDE window candidate "
                 "set for step strategies that draw from a list (e.g. '1,2,3'). "
-                "Required by epoch_global_window: valid indices depend on the schedule, so "
+                "Required by epoch_global_random_choice: valid indices depend on the schedule, so "
                 "there is no safe default.",
             )
             parser.add_argument(
@@ -399,7 +406,7 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
                 help="Dotted path to a factory(args) -> StepStrategy callable. "
-                "Overrides --diffusion-sde-window-size.",
+                "Overrides --diffusion-num-sde-steps.",
             )
             parser.add_argument(
                 "--diffusion-log-prob-no-const",
@@ -1143,6 +1150,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Hugging Face processor path for PickScore. Required when --rm-type pickscore.",
             )
             parser.add_argument(
+                "--pickscore-num-frames",
+                type=int,
+                default=None,
+                help="Evenly spaced frames to score per video (None = every frame).",
+            )
+            parser.add_argument(
                 "--pickscore-model-path",
                 type=str,
                 default=None,
@@ -1350,6 +1363,8 @@ def miles_validate_args(args):
     if args.diffusion_log_image_interval < 1:
         raise ValueError(f"diffusion_log_image_interval must be >= 1, got {args.diffusion_log_image_interval}")
 
+    args.rollout_patch_groups = ["sgld"] if args.apply_sgld_monkey_patches else []
+
     if getattr(args, "diffusion_model", None):
         from miles.utils.misc import load_function
 
@@ -1368,6 +1383,15 @@ def miles_validate_args(args):
             args.train_pipeline_config_path = f"{cfg_cls.__module__}.{cfg_cls.__qualname__}"
         if args.model_backend_path is None:
             args.model_backend_path = cfg_cls.model_backend_path
+        if cfg_cls.rollout_patch_group:
+            args.rollout_patch_groups.append(cfg_cls.rollout_patch_group)
+        if not cfg_cls.supports_cfg_training and (
+            args.diffusion_guidance_scale != 1.0 or args.diffusion_negative_prompt is not None
+        ):
+            raise ValueError(
+                f"{cfg_cls.__name__} trains unguided (supports_cfg_training=False); set "
+                f"--diffusion-guidance-scale 1.0 and drop --diffusion-negative-prompt"
+            )
         cfg_cls.validate_args(args)
         if args.use_lora and args.lora_target_modules is None:
             args.lora_target_modules = list(cfg_cls.lora_target_modules)
@@ -1433,6 +1457,23 @@ def miles_validate_args(args):
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
+
+    # cps/ode log_probs drop Gaussian constants on both the engine and trainer sides.
+    if args.diffusion_sde_type in ("cps", "ode"):
+        args.diffusion_log_prob_no_const = True
+
+    # The train-side scorer must replicate the rollout dynamics; derive it from the same knob.
+    if args.sde_step_backend_path is None:
+        sde_step_backends = {
+            "sde": "miles.backends.fsdp_utils.sde_step_backend.DiffusersSdeStepBackend",
+            "cps": "miles.backends.fsdp_utils.sde_step_backend.CpsSdeStepBackend",
+        }
+        if args.diffusion_sde_type not in sde_step_backends:
+            raise ValueError(
+                f"no train-side sde step backend for --diffusion-sde-type {args.diffusion_sde_type!r}; "
+                f"implemented: {sorted(sde_step_backends)}; pass --sde-step-backend-path for a custom one"
+            )
+        args.sde_step_backend_path = sde_step_backends[args.diffusion_sde_type]
 
     if args.num_steps_per_rollout is not None:
         samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt

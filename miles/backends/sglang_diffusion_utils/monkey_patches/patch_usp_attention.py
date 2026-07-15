@@ -10,10 +10,13 @@ def _patched_forward(
     k: torch.Tensor,
     v: torch.Tensor,
     attn_mask=None,
+    attn_mask_meta=None,  # compat shim: new sglang passes varlen mask meta; fail loud if used
     num_replicated_prefix: int = 0,
     num_replicated_suffix: int = 0,
     skip_sequence_parallel_override: bool = False,
 ):
+    if attn_mask_meta is not None:
+        raise NotImplementedError("SGLD SDPA override does not support attn_mask_meta; pass a dense attn_mask.")
     # Pass attn_mask through unchanged so PyTorch's SDPA dispatches to flash
     # (mask=None path) or efficient (mask present) backend matching diffusers.
     out = F.scaled_dot_product_attention(

@@ -10,6 +10,7 @@ from paddleocr import PaddleOCR
 from PIL import Image
 
 from miles.utils.misc import SingletonMeta
+from miles.utils.processing_utils import cfhw_to_fhwc, image_or_video_to_uint8
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -130,19 +131,15 @@ def _rgb_hwc_from_generated(sample: Sample) -> np.ndarray:
     t = sample.generated_output
     if t is None:
         raise ValueError("generated_output is None")
+    t = t.detach().cpu().float()
     if t.ndim == 3:
         t = t.unsqueeze(1)
     if t.ndim != 4:
         raise ValueError(f"generated_output must be 3D [C, H, W] or 4D [C, F, H, W], got {tuple(t.shape)}")
-    if t.shape[1] != 1:
-        raise ValueError(f"generated_output frame dim F must be 1 for image models, got F={t.shape[1]}")
-    frame_chw = t[:, 0, :, :]
-    hwc = frame_chw.numpy().transpose(1, 2, 0)
-    if float(hwc.max()) <= 1.0 + 1e-3:
-        out = np.round(hwc * 255.0).clip(0, 255).astype(np.uint8)
-    else:
-        out = hwc.clip(0, 255).astype(np.uint8)
-    return out
+    fhwc = cfhw_to_fhwc(t)
+    if fhwc.shape[0] != 1:
+        raise ValueError(f"generated_output frame dim F must be 1 for image models, got F={fhwc.shape[0]}")
+    return image_or_video_to_uint8(fhwc[0], round_normalized=True).numpy()
 
 
 async def ocr_rm(args, sample: Sample):

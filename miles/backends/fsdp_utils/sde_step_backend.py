@@ -120,3 +120,44 @@ class DiffusersSdeStepBackend(SdeStepBackend):
             + model_output * (1 + std_dev_t**2 * (1 - sigma) / (2 * sigma)) * dt
         )
         return prev_mean, std_dev_t * torch.sqrt(-1 * dt), std_dev_t
+
+
+class CpsSdeStepBackend(SdeStepBackend):
+    """CPS dynamics; σ = timestep/divisor resolved straight from the rollout values."""
+
+    def resolve_sigmas(
+        self, timesteps: torch.Tensor, next_timesteps: torch.Tensor, *, ndim: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Linear timestep<->σ (timesteps are σ×divisor), so σ/σ_next come directly from the
+        # carried rollout values — no scheduler, no positional-alignment assumption.
+        divisor = float(self.sde_timestep_divisor)
+        view = (-1, *([1] * (ndim - 1)))
+        return (timesteps.float() / divisor).view(view), (next_timesteps.float() / divisor).view(view)
+
+    def prev_sample_mean_and_std(
+        self,
+        model_output: torch.Tensor,
+        sample: torch.Tensor,
+        sigma: torch.Tensor,
+        sigma_prev: torch.Tensor,
+        *,
+        noise_level: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # CPS kernel (matches sgl-d flow_sde_sampling rollout_sde_type="cps").
+        std_dev_t = sigma_prev * math.sin(noise_level * math.pi / 2)
+        pred_original = sample - sigma * model_output
+        noise_estimate = sample + model_output * (1.0 - sigma)
+        prev_mean = pred_original * (1.0 - sigma_prev) + noise_estimate * torch.sqrt(
+            torch.clamp(sigma_prev**2 - std_dev_t**2, min=1e-12)
+        )
+        return prev_mean, std_dev_t, std_dev_t
+
+    def log_prob(
+        self,
+        prev_sample: torch.Tensor,
+        prev_mean: torch.Tensor,
+        noise_std: torch.Tensor,
+    ) -> torch.Tensor:
+        # Drops constants — pairs with rollout_log_prob_no_const=True on the engine side.
+        log_prob = -((prev_sample.detach() - prev_mean) ** 2)
+        return log_prob.mean(dim=tuple(range(1, log_prob.ndim)))

@@ -79,12 +79,20 @@ class TrainPipelineConfig(abc.ABC):
     optimizer_state_allowed_missing: list[str] = []
     # Case-insensitive substrings matched against the checkpoint name (--diffusion-model).
     hf_ckpt_name_patterns: tuple[str, ...] = ()
+    supports_cfg_training: bool = True
+    # Rollout parity patch group applied by the engine (see monkey_patches; None = none).
+    rollout_patch_group: str | None = None
     # Default component paths (miles custom-function style); CLI args override.
     model_backend_path: str = "miles.backends.fsdp_utils.model_backend.DiffusersModelBackend"
 
     @classmethod  # noqa: B027 — optional hook, deliberately non-abstract
     def validate_args(cls, args) -> None:
         """Family-specific arg validation/defaults; runs once at arg validation."""
+
+    sde_timestep_divisor = 1.0
+
+    def configure(self, args) -> None:  # noqa: B027  optional no-op hook, not abstract
+        """Bind the request constants a family needs at train time; default binds none."""
 
     def compute_noise_pred(
         self,
