@@ -22,6 +22,8 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
     rollout_patch_group = "ltx"
     hf_ckpt_name_patterns = ("ltx",)
     model_backend_path = "miles.backends.fsdp_utils.model_backend.LTXModelBackend"
+    # Audio branch has no optimizer state: we only train the video stream.
+    optimizer_state_allowed_missing = ["audio"]
 
     def configure(self, args: Namespace) -> None:
         self._height = args.diffusion_height

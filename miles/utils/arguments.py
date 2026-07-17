@@ -673,8 +673,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--start-rollout-id",
                 type=int,
-                default=0,
-                help="The starting rollout step.",
+                default=None,
+                help=(
+                    "The starting rollout step; if unset, resume it from --load when continuing "
+                    "training, otherwise default to 0 (train from scratch)."
+                ),
             )
 
             # batch sizes
