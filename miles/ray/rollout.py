@@ -487,6 +487,9 @@ def init_rollout_engines(args, pg, all_rollout_engines):
             "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false",
             "SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE": "false",
         }
+        if args.lora_ipc_weight_sync:
+            # Merge in the train forward dtype, not fp32, to cut train/rollout consistency error.
+            env_vars["SGLANG_DIFFUSION_LORA_MERGE_FP32"] = "1" if args.diffusion_forward_dtype == "fp32" else "0"
 
         rollout_engine = RolloutRayActor.options(
             num_cpus=num_cpus,
