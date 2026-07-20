@@ -53,13 +53,16 @@ class LossOutput:
 
 
 @dataclass
-class TrainLabels:
-    """Post-reward labels attached to samples before ``build_train_data``."""
+class TrainSignals:
+    """Reward-derived training signals attached to samples before ``build_train_data``.
+
+    Not classification labels: e.g. GRPO advantages or NFT soft +/− weights.
+    """
 
     raw_rewards: list[float]
     advantages: list[float] | None = None
-    # Reserved for DiffusionNFT soft positive/negative labels; Flow-GRPO ignores it.
-    nft_labels: list[float] | None = None
+    # Reserved for DiffusionNFT soft positive/negative weights; Flow-GRPO ignores it.
+    nft_signals: list[float] | None = None
 
 
 @runtime_checkable
@@ -72,9 +75,9 @@ class DiffusionAlgorithm(Protocol):
         """Return acquisition contract; see ``CollectionSpec`` — not fully consumed yet."""
         ...
 
-    def postprocess_rewards(self, args, samples: list) -> TrainLabels: ...
+    def postprocess_rewards(self, args, samples: list) -> TrainSignals: ...
 
-    def build_train_data(self, args, samples: list, labels: TrainLabels) -> dict[str, Any]: ...
+    def build_train_data(self, args, samples: list, signals: TrainSignals) -> dict[str, Any]: ...
 
     def validate_train_batch(self, batch: list[dict]) -> list[str]: ...
 

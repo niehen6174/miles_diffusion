@@ -6,8 +6,8 @@ from typing import Any
 
 import torch
 
-from miles.algorithms.base import CollectionSpec, TrainLabels, TrainLossContext
-from miles.algorithms.labels import grpo_group_advantages
+from miles.algorithms.base import CollectionSpec, TrainLossContext, TrainSignals
+from miles.algorithms.signals import grpo_group_advantages
 from miles.algorithms.train_forward_utils import (
     append_rollout_train_abs_diff_stats,
     compute_noise_pred,
@@ -40,12 +40,12 @@ class FlowGRPOAlgorithm:
             sync_weights_to_rollout=True,
         )
 
-    def postprocess_rewards(self, args, samples: list[Sample]) -> TrainLabels:
+    def postprocess_rewards(self, args, samples: list[Sample]) -> TrainSignals:
         return grpo_group_advantages(args, samples)
 
-    def build_train_data(self, args, samples: list[Sample], labels: TrainLabels) -> dict[str, Any]:
-        rewards = labels.advantages if labels.advantages is not None else labels.raw_rewards
-        return RolloutTrainDataConverter().convert_samples(samples, rewards, labels.raw_rewards)
+    def build_train_data(self, args, samples: list[Sample], signals: TrainSignals) -> dict[str, Any]:
+        rewards = signals.advantages if signals.advantages is not None else signals.raw_rewards
+        return RolloutTrainDataConverter().convert_samples(samples, rewards, signals.raw_rewards)
 
     def validate_train_batch(self, batch: list[dict]) -> list[str]:
         errors: list[str] = []

@@ -2,8 +2,8 @@ from argparse import Namespace
 from types import SimpleNamespace
 
 from miles.algorithms.flow_grpo import FlowGRPOAlgorithm
-from miles.algorithms.labels import grpo_group_advantages
 from miles.algorithms.registry import builtin_algorithm_names, load_algorithm, resolve_algorithm_class_path
+from miles.algorithms.signals import grpo_group_advantages
 from miles.utils.types import Sample
 
 
@@ -39,6 +39,6 @@ def test_grpo_group_advantages():
         Sample(prompt="a", reward=1.0),
         Sample(prompt="a", reward=3.0),
     ]
-    labels = grpo_group_advantages(args, samples)
-    assert len(labels.advantages) == 2
-    assert abs(sum(labels.advantages)) < 1e-5
+    signals = grpo_group_advantages(args, samples)
+    assert len(signals.advantages) == 2
+    assert abs(sum(signals.advantages)) < 1e-5

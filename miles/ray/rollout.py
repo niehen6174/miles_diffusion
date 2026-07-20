@@ -319,9 +319,9 @@ class RolloutManager:
         if self.custom_reward_post_process_func is not None:
             return self.custom_reward_post_process_func(self.args, samples)
 
-        labels = self.algorithm.postprocess_rewards(self.args, samples)
-        advantages = labels.advantages if labels.advantages is not None else labels.raw_rewards
-        return labels.raw_rewards, advantages
+        signals = self.algorithm.postprocess_rewards(self.args, samples)
+        advantages = signals.advantages if signals.advantages is not None else signals.raw_rewards
+        return signals.raw_rewards, advantages
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """
@@ -332,13 +332,13 @@ class RolloutManager:
 
         if self.custom_reward_post_process_func is not None:
             raw_rewards, rewards = self._post_process_rewards(samples)
-            from miles.algorithms.base import TrainLabels
+            from miles.algorithms.base import TrainSignals
 
-            labels = TrainLabels(raw_rewards=raw_rewards, advantages=rewards)
+            signals = TrainSignals(raw_rewards=raw_rewards, advantages=rewards)
         else:
-            labels = self.algorithm.postprocess_rewards(self.args, samples)
-            raw_rewards = labels.raw_rewards
-            rewards = labels.advantages if labels.advantages is not None else labels.raw_rewards
+            signals = self.algorithm.postprocess_rewards(self.args, samples)
+            raw_rewards = signals.raw_rewards
+            rewards = signals.advantages if signals.advantages is not None else signals.raw_rewards
 
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
@@ -378,7 +378,7 @@ class RolloutManager:
                 reward_key=self.args.reward_key,
             )
 
-        return self.algorithm.build_train_data(self.args, samples, labels)
+        return self.algorithm.build_train_data(self.args, samples, signals)
 
     def _log_images(
         self,
