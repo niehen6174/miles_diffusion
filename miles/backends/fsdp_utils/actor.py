@@ -21,10 +21,8 @@ from miles.utils.metric_utils import compute_rollout_step
 from miles.utils.profile_utils import TrainProfiler
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
-from miles.utils.train_data_utils import (
-    build_microbatch_schedule,
-    validate_same_microbatch_counts_across_dp,
-)
+from miles.utils.train_data_utils import build_microbatch_schedule, validate_same_microbatch_counts_across_dp
+
 from . import checkpoint
 from .diffusion_update_weight_utils import (
     DiffusionUpdateWeightFromTensor,

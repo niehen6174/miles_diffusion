@@ -15,7 +15,11 @@ from miles.algorithms.train_forward_utils import (
     resolve_cfg_flags,
     select_model_for_timesteps,
 )
-from miles.utils.train_data_utils import RolloutTrainDataConverter, scheduler_meta_from_rollout, stack_train_pair_rollout_debug
+from miles.utils.train_data_utils import (
+    RolloutTrainDataConverter,
+    scheduler_meta_from_rollout,
+    stack_train_pair_rollout_debug,
+)
 from miles.utils.types import Sample
 
 
@@ -86,7 +90,6 @@ class FlowGRPOAlgorithm:
         forward_dtype = ctx.forward_dtype
         train_pipeline_config = ctx.train_pipeline_config
         device = ctx.device
-        bsz = len(batch)
 
         use_cfg, guidance_scale, true_cfg_scale = resolve_cfg_flags(args)
         clip_range = args.diffusion_clip_range

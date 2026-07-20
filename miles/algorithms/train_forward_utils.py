@@ -50,9 +50,7 @@ def select_model_for_timesteps(
         component, model = next(iter(ctx.models.items()))
         return component, model, guidance_scale
 
-    components = {
-        train_pipeline_config.component_for_timestep(t, num_train_timesteps) for t in timesteps.tolist()
-    }
+    components = {train_pipeline_config.component_for_timestep(t, num_train_timesteps) for t in timesteps.tolist()}
     if len(components) > 1:
         raise ValueError(
             f"Micro-batch mixes denoising phases {sorted(components)}; set "
