@@ -142,6 +142,7 @@ fi
   --pickscore-num-frames "${PICKSCORE_NUM_FRAMES:-3}" \
   --pickscore-num-gpus-per-worker "${PICKSCORE_NUM_GPUS_PER_WORKER:-0}" \
   --pickscore-num-workers "${PICKSCORE_NUM_WORKERS:-1}" \
+  --rollout-parser-num-workers "${ROLLOUT_PARSER_NUM_WORKERS:-8}" \
   --pickscore-batch-size "${PICKSCORE_BATCH_SIZE:-8}" \
   --update-weight-buffer-size "${UPDATE_WEIGHT_BUFFER_SIZE:-2147483648}" \
   --save "${SAVE_DIR}" \
