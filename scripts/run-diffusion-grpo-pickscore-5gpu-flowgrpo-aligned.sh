@@ -55,7 +55,8 @@ hf download --repo-type dataset rockdu/miles-diffusion-datasets \
   --input-key input \
   --rollout-batch-size 32 \
   --n-samples-per-prompt 16 \
-  --num-rollout 100000 \
+  --num-rollout 400 \
+  --deterministic-mode \
   --diffusion-microgroup-size 8 \
   --micro-batch-size-sample 8 \
   --micro-batch-size-tstep 1 \
@@ -67,6 +68,7 @@ hf download --repo-type dataset rockdu/miles-diffusion-datasets \
   --num-gpus-per-node 5 \
   --colocate \
   --use-lora \
+  --lora-ipc-weight-sync \
   --lora-rank 64 \
   --lora-alpha 128 \
   --diffusion-init-lora-weight gaussian \
