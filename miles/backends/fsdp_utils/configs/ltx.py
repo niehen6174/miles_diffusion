@@ -54,13 +54,13 @@ class LTXTrainPipelineConfig(TrainPipelineConfig):
             if audio_ctx.ndim == 2:
                 audio_ctx = audio_ctx.unsqueeze(0)
             kwargs["audio_context"] = audio_ctx
-        if cond.encoder_attention_mask is not None:
-            mask = cond.encoder_attention_mask.to(device)
+        if cond.encoder_attention_mask:
+            mask = torch.cat(cond.encoder_attention_mask).to(device)
             if mask.ndim == 1:
                 mask = mask.unsqueeze(0)
             kwargs["context_mask"] = mask
-        if cond.audio_encoder_attention_mask is not None:
-            audio_mask = cond.audio_encoder_attention_mask.to(device)
+        if cond.audio_encoder_attention_mask:
+            audio_mask = torch.cat(cond.audio_encoder_attention_mask).to(device)
             if audio_mask.ndim == 1:
                 audio_mask = audio_mask.unsqueeze(0)
             kwargs["audio_context_mask"] = audio_mask

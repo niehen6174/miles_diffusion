@@ -113,8 +113,12 @@ def _parse_cond_kwargs(
             data.get("audio_encoder_hidden_states"),
             deserialize_func=deserialize_func,
         ),
-        encoder_attention_mask=deserialize_func(data.get("encoder_attention_mask")),
-        audio_encoder_attention_mask=deserialize_func(data.get("audio_encoder_attention_mask")),
+        encoder_attention_mask=_parse_tensor_or_list(
+            data.get("encoder_attention_mask"), deserialize_func=deserialize_func
+        ),
+        audio_encoder_attention_mask=_parse_tensor_or_list(
+            data.get("audio_encoder_attention_mask"), deserialize_func=deserialize_func
+        ),
         pooled_projections=_parse_tensor_or_list(data.get("pooled_projections"), deserialize_func=deserialize_func),
     )
 
