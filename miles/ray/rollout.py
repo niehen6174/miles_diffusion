@@ -12,6 +12,7 @@ import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
+from miles.algorithms.registry import load_algorithm
 from miles.backends.sglang_diffusion_utils.sglang_diffusion_engine import SGLangDiffusionEngine
 from miles.rollout.base_types import call_rollout_fn
 from miles.utils import tracking_utils
@@ -24,7 +25,7 @@ from miles.utils.metric_utils import compute_rollout_step, compute_statistics, d
 from miles.utils.misc import load_function
 from miles.utils.ray_utils import Box
 from miles.utils.tracking_utils import init_tracking
-from miles.utils.train_data_utils import RolloutTrainDataConverter, TrainDataDPSplitter, reorder_train_pairs_for_tiling
+from miles.utils.train_data_utils import TrainDataDPSplitter, reorder_train_pairs_for_tiling
 from miles.utils.types import Sample
 
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -70,10 +71,12 @@ class RolloutManager:
             if self.args.custom_convert_samples_to_train_data_path is not None
             else None
         )
-        self.train_data_converter = RolloutTrainDataConverter()
+        self.algorithm = load_algorithm(args)
+        self.collection_spec = self.algorithm.collection_spec()
         self.train_data_dp_splitter = TrainDataDPSplitter()
         logger.info(f"import {self.args.rollout_function_path} as generate_rollout function.")
         logger.info(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
+        logger.info("RolloutManager diffusion algorithm=%s", self.algorithm.name)
 
         logger.info("RolloutManager rollout_num_gpus=%s", self.args.rollout_num_gpus)
 
@@ -316,29 +319,9 @@ class RolloutManager:
         if self.custom_reward_post_process_func is not None:
             return self.custom_reward_post_process_func(self.args, samples)
 
-        raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
-
-        # --globalize-reward-mean / --globalize-reward-std are orthogonal. flow_grpo
-        # pickscore_qwenimage uses per-prompt mean + global std (PerPromptStatTracker
-        # with global_std=True), which is --globalize-reward-std alone.
-        rewards_flat = torch.tensor(raw_rewards, dtype=torch.float)
-        rewards = rewards_flat.view(-1, self.args.n_samples_per_prompt)
-
-        if self.args.globalize_reward_mean:
-            mean = rewards_flat.mean()
-        else:
-            mean = rewards.mean(dim=-1, keepdim=True)
-        rewards = rewards - mean
-
-        if self.args.grpo_std_normalization:
-            if self.args.globalize_reward_std:
-                std = rewards_flat.std()
-            else:
-                std = rewards.std(dim=-1, keepdim=True)
-            # matches flow_grpo's `+ 1e-4` in both stat_tracking branches
-            rewards = rewards / (std + 1e-4)
-
-        return raw_rewards, rewards.flatten().tolist()
+        labels = self.algorithm.postprocess_rewards(self.args, samples)
+        advantages = labels.advantages if labels.advantages is not None else labels.raw_rewards
+        return labels.raw_rewards, advantages
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """
@@ -347,7 +330,15 @@ class RolloutManager:
         if self.custom_convert_samples_to_train_data_func is not None:
             return self.custom_convert_samples_to_train_data_func(self.args, samples)
 
-        raw_rewards, rewards = self._post_process_rewards(samples)
+        if self.custom_reward_post_process_func is not None:
+            raw_rewards, rewards = self._post_process_rewards(samples)
+            from miles.algorithms.base import TrainLabels
+
+            labels = TrainLabels(raw_rewards=raw_rewards, advantages=rewards)
+        else:
+            labels = self.algorithm.postprocess_rewards(self.args, samples)
+            raw_rewards = labels.raw_rewards
+            rewards = labels.advantages if labels.advantages is not None else labels.raw_rewards
 
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
@@ -387,7 +378,7 @@ class RolloutManager:
                 reward_key=self.args.reward_key,
             )
 
-        return self.train_data_converter.convert_samples(samples, rewards, raw_rewards)
+        return self.algorithm.build_train_data(self.args, samples, labels)
 
     def _log_images(
         self,

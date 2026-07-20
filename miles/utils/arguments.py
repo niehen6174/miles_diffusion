@@ -259,6 +259,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="HuggingFace model id for diffusion rollout.",
             )
             parser.add_argument(
+                "--diffusion-algorithm",
+                type=str,
+                default="flow_grpo",
+                choices=["flow_grpo"],
+                help=(
+                    "Diffusion training algorithm plugin. Currently supports flow_grpo only "
+                    "(reverse-SDE PPO-clip GRPO). Use --diffusion-algorithm-path for experiments."
+                ),
+            )
+            parser.add_argument(
+                "--diffusion-algorithm-path",
+                type=str,
+                default=None,
+                help="Optional dotted class path overriding --diffusion-algorithm.",
+            )
+            parser.add_argument(
                 "--train-pipeline-config-path",
                 type=str,
                 default=None,
@@ -1367,6 +1383,11 @@ def miles_validate_args(args):
         raise ValueError(f"diffusion_log_image_interval must be >= 1, got {args.diffusion_log_image_interval}")
 
     args.rollout_patch_groups = ["sgld"] if args.apply_sgld_monkey_patches else []
+
+    # Resolve diffusion algorithm class path early so rollout/train share one identity.
+    from miles.algorithms.registry import resolve_algorithm_class_path
+
+    args.diffusion_algorithm_path = resolve_algorithm_class_path(args)
 
     if getattr(args, "diffusion_model", None):
         from miles.utils.misc import load_function

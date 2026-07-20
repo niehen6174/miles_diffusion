@@ -8,8 +8,9 @@ import torch
 
 @dataclass(frozen=True)
 class DiffusionRolloutSpec:
-    # Required rollout keys to reconstruct per-step log_prob_new and PPO ratio in training.
-    # latents and next latents for log_prob_new in training, log_prob_old used with log_prob_new (in training) to get ratio.
+    # Flow-GRPO default: reconstruct per-step log_prob_new and PPO ratio in training.
+    # Forward-matching algorithms (SFT/AWM/NFT) validate via DiffusionAlgorithm.validate_train_batch
+    # instead of this global spec.
     required_keys: tuple[str, ...] = ("timesteps", "sigmas", "latents", "next_latents", "log_prob_old")
     # Optional rollout keys for KL regularization or debugging.
     # mean of distribution p(x_{t+1} | x_t), for KL
@@ -18,6 +19,7 @@ class DiffusionRolloutSpec:
 
 @dataclass(frozen=True)
 class DiffusionTrainSpec:
+    # Flow-GRPO train-side keys. Prefer algorithm.validate_train_batch for new algorithms.
     required_keys: tuple[str, ...] = ("log_prob_old", "log_prob_new", "advantage")
 
 
