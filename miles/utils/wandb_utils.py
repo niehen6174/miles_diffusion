@@ -111,11 +111,11 @@ def init_wandb_secondary(args, router_addr=None):
     if offline:
         settings_kwargs = dict(mode="offline")
     else:
+        # Keep stats on so GPU workers report per-GPU system metrics.
         settings_kwargs = dict(
             mode="shared",
             x_primary=False,
             x_update_finish_state=False,
-            x_disable_stats=True,
         )
 
     if getattr(args, "sglang_enable_metrics", False) and router_addr is not None:
