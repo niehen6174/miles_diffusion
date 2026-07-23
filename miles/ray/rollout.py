@@ -12,6 +12,7 @@ import torch
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from sglang.srt.constants import GPU_MEMORY_TYPE_WEIGHTS
 
+from miles.backends.fsdp_utils.loss_hub import grpo_normalize_rewards
 from miles.backends.sglang_diffusion_utils.sglang_diffusion_engine import SGLangDiffusionEngine
 from miles.rollout.base_types import call_rollout_fn
 from miles.utils import tracking_utils
@@ -315,30 +316,8 @@ class RolloutManager:
         # list[list[Sample]] is for custom reward post process function
         if self.custom_reward_post_process_func is not None:
             return self.custom_reward_post_process_func(self.args, samples)
-
-        raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
-
-        # --globalize-reward-mean / --globalize-reward-std are orthogonal. flow_grpo
-        # pickscore_qwenimage uses per-prompt mean + global std (PerPromptStatTracker
-        # with global_std=True), which is --globalize-reward-std alone.
-        rewards_flat = torch.tensor(raw_rewards, dtype=torch.float)
-        rewards = rewards_flat.view(-1, self.args.n_samples_per_prompt)
-
-        if self.args.globalize_reward_mean:
-            mean = rewards_flat.mean()
-        else:
-            mean = rewards.mean(dim=-1, keepdim=True)
-        rewards = rewards - mean
-
-        if self.args.grpo_std_normalization:
-            if self.args.globalize_reward_std:
-                std = rewards_flat.std()
-            else:
-                std = rewards.std(dim=-1, keepdim=True)
-            # matches flow_grpo's `+ 1e-4` in both stat_tracking branches
-            rewards = rewards / (std + 1e-4)
-
-        return raw_rewards, rewards.flatten().tolist()
+        # Default building block (override via --custom-reward-post-process-path).
+        return grpo_normalize_rewards(self.args, samples)
 
     def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
         """
