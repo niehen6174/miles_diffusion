@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from argparse import Namespace
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 

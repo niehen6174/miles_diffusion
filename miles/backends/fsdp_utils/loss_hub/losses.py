@@ -101,8 +101,7 @@ def flow_grpo_ppo_loss(
         component, model = next(iter(models.items()))
     else:
         components = {
-            train_pipeline_config.component_for_timestep(t, num_train_timesteps)
-            for t in timesteps_microbatch.tolist()
+            train_pipeline_config.component_for_timestep(t, num_train_timesteps) for t in timesteps_microbatch.tolist()
         }
         if len(components) > 1:
             raise ValueError(

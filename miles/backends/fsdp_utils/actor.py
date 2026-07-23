@@ -2,7 +2,7 @@ import logging
 import warnings
 from argparse import Namespace
 from collections import defaultdict
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from itertools import chain
 
 import ray

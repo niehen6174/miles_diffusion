@@ -8,11 +8,7 @@ from argparse import Namespace
 
 import pytest
 
-from miles.backends.fsdp_utils.loss_hub import (
-    flow_grpo_ppo_loss,
-    get_diffusion_loss_function,
-    grpo_normalize_rewards,
-)
+from miles.backends.fsdp_utils.loss_hub import flow_grpo_ppo_loss, get_diffusion_loss_function, grpo_normalize_rewards
 from miles.utils.types import Sample
 
 
