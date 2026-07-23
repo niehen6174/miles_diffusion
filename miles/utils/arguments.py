@@ -859,11 +859,22 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--loss-type",
                 type=str,
-                choices=["policy_loss", "sft_loss", "custom_loss"],
-                default="policy_loss",
+                choices=["flow_grpo_ppo", "policy_loss", "sft_loss", "custom_loss"],
+                default="flow_grpo_ppo",
                 help=(
-                    "Choose loss type, currently support ppo policy_loss or sft_loss, "
-                    "if custom_loss is set, we will use the function path from `--custom-loss-function-path`."
+                    "Train objective. Diffusion default is flow_grpo_ppo (reverse-SDE PPO-clip). "
+                    "policy_loss is accepted as an alias of flow_grpo_ppo on the FSDP diffusion actor. "
+                    "custom_loss loads `--custom-loss-function-path` (miles customization style)."
+                ),
+            )
+            parser.add_argument(
+                "--custom-loss-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "Dotted path to a diffusion loss function "
+                    "`fn(ctx, batch, *, log_stats, pad_to_len=None) -> Tensor`. "
+                    "Used when `--loss-type custom_loss`, or whenever this path is set."
                 ),
             )
             parser.add_argument(
