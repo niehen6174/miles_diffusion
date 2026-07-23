@@ -18,7 +18,7 @@ from miles.utils.types import Sample
 
 def _args(**overrides):
     base = dict(
-        loss_type="flow_grpo_ppo",
+        loss_type="flow_grpo",
         custom_loss_function_path=None,
         n_samples_per_prompt=2,
         globalize_reward_mean=False,
@@ -36,6 +36,9 @@ class TestGetDiffusionLossFunction:
 
     def test_policy_loss_alias(self):
         assert get_diffusion_loss_function(_args(loss_type="policy_loss")) is flow_grpo_ppo_loss
+
+    def test_flow_grpo_ppo_alias(self):
+        assert get_diffusion_loss_function(_args(loss_type="flow_grpo_ppo")) is flow_grpo_ppo_loss
 
     def test_custom_path(self):
         fn = get_diffusion_loss_function(

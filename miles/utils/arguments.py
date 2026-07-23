@@ -859,11 +859,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--loss-type",
                 type=str,
-                choices=["flow_grpo_ppo", "policy_loss", "sft_loss", "custom_loss"],
-                default="flow_grpo_ppo",
+                choices=["flow_grpo", "flow_grpo_ppo", "policy_loss", "sft_loss", "custom_loss"],
+                default="flow_grpo",
                 help=(
-                    "Train objective. Diffusion default is flow_grpo_ppo (reverse-SDE PPO-clip). "
-                    "policy_loss is accepted as an alias of flow_grpo_ppo on the FSDP diffusion actor. "
+                    "Train objective. Diffusion default is flow_grpo (Flow-GRPO: reverse-SDE + PPO-clip). "
+                    "flow_grpo_ppo and policy_loss are accepted as aliases on the FSDP diffusion actor. "
                     "custom_loss loads `--custom-loss-function-path` (miles customization style)."
                 ),
             )

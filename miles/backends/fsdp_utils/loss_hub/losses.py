@@ -1,6 +1,6 @@
 """Diffusion loss building blocks (miles ``loss_hub`` style).
 
-Builtin: ``flow_grpo_ppo`` (reverse-SDE PPO-clip). Custom objectives use
+Builtin: ``flow_grpo`` (Flow-GRPO reverse-SDE PPO-clip). Custom objectives use
 ``--loss-type custom_loss --custom-loss-function-path module.fn``.
 """
 
@@ -45,13 +45,12 @@ def get_diffusion_loss_function(args: Namespace) -> DiffusionLossFunction:
         if fn is None:
             raise ValueError(f"Failed to load custom loss from {path!r}")
         return fn
-    if loss_type in ("flow_grpo_ppo", "policy_loss"):
-        # policy_loss kept as alias so legacy scripts that leave the LLM default
-        # unchanged still hit Flow-GRPO on the diffusion actor path.
+    if loss_type in ("flow_grpo", "flow_grpo_ppo", "policy_loss"):
+        # flow_grpo_ppo / policy_loss kept as aliases for older scripts.
         return flow_grpo_ppo_loss
     raise ValueError(
         f"Unsupported diffusion --loss-type {loss_type!r}. "
-        "Use flow_grpo_ppo (default), policy_loss (alias), or custom_loss."
+        "Use flow_grpo (default), policy_loss (alias), or custom_loss."
     )
 
 

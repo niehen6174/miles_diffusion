@@ -55,7 +55,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
     Loads only the DiT (transformer) from a diffusers pipeline, wraps it with
     FSDP, and schedules micro-batches. The train objective comes from
-    ``get_diffusion_loss_function`` (default Flow-GRPO PPO-clip; override via
+    ``get_diffusion_loss_function`` (default Flow-GRPO; override via
     ``--loss-type`` / ``--custom-loss-function-path``).
     """
 
