@@ -1,8 +1,18 @@
-"""Real single-GPU FSDP2 CPU-offload accumulation versus eager AdamW."""
+"""PDD FSDP parity, checkpoint resume and CPU-offload accumulation."""
+
+from tests.ci.ci_register import register_cuda_ci
+
+register_cuda_ci(est_time=90, suite="stage-b-5-gpu-h200", labels=["fsdp"])
 
 import copy
 import json
+import os
 import socket
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
@@ -20,7 +30,8 @@ class Model(torch.nn.Module):
         return self.b(torch.nn.functional.silu(checkpoint(self.a, x, use_reentrant=False)))
 
 
-def main():
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+def test_cpu_offload_accumulation():
     torch.cuda.set_device(0)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -81,5 +92,26 @@ def main():
         dist.destroy_process_group()
 
 
-if __name__ == "__main__":
-    main()
+@pytest.mark.parametrize("world_size", [1, 2])
+def test_pdd_fsdp_resume(tmp_path, world_size):
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"Requires {world_size} CUDA devices")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            f"--nproc-per-node={world_size}",
+            str(Path(__file__).with_name("_pdd_worker.py")),
+            "--output",
+            str(tmp_path),
+        ],
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((tmp_path / "verification.json").read_text())
+    assert report["state"] == "passed" and report["world_size"] == world_size

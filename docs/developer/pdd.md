@@ -54,54 +54,57 @@ must be a new directory; this minimal encoder does not resume partial caches.
 Training validates the input-file hash, row IDs, shard hashes and tensor shapes.
 Existing compatible format-v1 training caches can be reused.
 
-## Train, resume and export
+## Train and resume
+
+Use the existing training entry point directly:
 
 ```bash
-bash scripts/run_pdd_miles_qwen21.sh --num-rollout 128
+python train_sft.py \
+  --loss-type pdd --train-only --train-backend fsdp \
+  --hf-checkpoint "$MODEL" \
+  --diffusion-model-family qwen_image21 --diffusion-task t2i \
+  --pdd-train-cache "$CACHE" --prompt-data "$PROMPTS" --input-key input \
+  --actor-num-gpus-per-node 2 --num-gpus-per-node 2 \
+  --rollout-batch-size 8 --n-samples-per-prompt 1 --num-steps-per-rollout 8 \
+  --num-rollout 128 --micro-batch-size 1 --gradient-checkpointing \
+  --fsdp-master-dtype fp32 --fsdp-reduce-dtype fp32 --diffusion-forward-dtype bf16 \
+  --diffusion-height 1024 --diffusion-width 1024 \
+  --diffusion-guidance-scale 1 --diffusion-true-cfg-scale 1 \
+  --lr 5e-7 --weight-decay 0 --adam-beta2 0.999 --seed 42 \
+  --save "$OUTPUT/ckpt" --save-interval 1 --skip-eval-before-train
 ```
 
-The recipe defaults to two GPUs and eight trajectories per rollout. Without
-`PDD_INIT`, all student heads start from the base model's output projection.
-Set `PDD_INIT=/path/to/export.pt` to initialize from exported PDD weights with a
-fresh optimizer. Single-GPU CPU offload can be selected with
-`--actor-num-gpus-per-node 1 --num-gpus-per-node 1 --fsdp-cpu-offload`.
+This recipe uses two GPUs and eight trajectories per rollout. By default, all
+student heads start from the base model's output projection. An existing
+compatible PDD weights file can be passed with `--pdd-init-checkpoint /path/to/export.pt`
+for weights-only initialization with a fresh optimizer. Export tooling is outside
+this training change.
 
-Resume with the same model, cache and training configuration:
-
-```bash
-bash scripts/run_pdd_miles_qwen21.sh --num-rollout 256 --load "$OUTPUT/ckpt"
-```
+For single-GPU CPU offload, change both GPU-count arguments to `1` and add
+`--fsdp-cpu-offload`. To resume, rerun the command with `--load "$OUTPUT/ckpt"`
+and increase `--num-rollout` to the desired total (for example, `256`). Keep the
+model, cache and training configuration unchanged.
 
 Checkpoints contain model, optimizer, scheduler, per-rank Torch/CUDA RNG, protocol
 signature and dataset cursor. Saves occur only at complete trajectory boundaries.
 Resume rejects missing state or a changed protocol/data/topology. An interrupted
 trajectory is replayed from the preceding complete checkpoint.
 
-```bash
-python scripts/export_pdd_miles_checkpoint.py \
-  --checkpoint "$OUTPUT/ckpt/iter_0000128" --output "$OUTPUT/student.pt"
-```
-
-Export merges only student weights on CPU and refuses to overwrite an existing
-output. Allow host RAM and temporary disk space for the full model. The exported
-weights, grid and configuration can be loaded with `QwenImage21PDDStudent` and
-sampled with `sample_pdd`; text conditioning and VAE decoding remain the caller's
-responsibility. Exported weights are not a full training-resume checkpoint.
-
 ## Verification and limits
 
 ```bash
 python -m pytest tests/fast/distillation
-python -m torch.distributed.run --standalone --nproc-per-node=2 \
-  scripts/verify_pdd_miles_fsdp.py --output /scratch/pdd/tiny-fsdp-check
-python scripts/verify_pdd_cpu_offload.py
+python -m pytest tests/fast-gpu/backends/fsdp_utils/test_pdd.py
 ```
 
 Tests cover detached teacher supervision, selected-head gradients, signed
 nonuniform grids, trajectory carry, prompt-cache integrity and unsupported
-configurations. The tiny FSDP verifier compares updates with an unsharded
-reference and verifies checkpoint restoration and the next update. The offload
-verifier checks accumulated gradients and AdamW updates against eager execution.
+configurations. The GPU suite compares tiny-model FSDP updates with an unsharded
+reference and verifies checkpoint restoration and the next update on one and two
+ranks. The two-rank case skips when fewer than two GPUs are available. A separate
+case checks CPU-offloaded accumulated gradients and AdamW updates against eager
+execution. All GPU cases skip when CUDA is unavailable; pytest manages temporary
+checkpoint directories.
 
 These are correctness checks, not image-quality claims. This change does not
 include SGLang serving, online weight synchronization, automatic image metrics,
