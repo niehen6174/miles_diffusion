@@ -2,13 +2,7 @@ import pytest
 import torch
 from torch import nn
 
-from miles.distillation.pdd import (
-    ParallelLinear,
-    pdd_loss,
-    sample_pdd,
-    shifted_sigma_grid,
-    teacher_mean_velocity,
-)
+from miles.distillation.pdd import ParallelLinear, pdd_loss, sample_pdd, shifted_sigma_grid, teacher_mean_velocity
 
 
 @pytest.mark.parametrize("solver", ["euler", "midpoint"])

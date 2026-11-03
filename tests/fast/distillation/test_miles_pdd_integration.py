@@ -102,13 +102,13 @@ def test_eight_optimizer_updates_match_reference_and_carry_preupdate_states():
             torch.testing.assert_close(loss, expected.loss, rtol=0, atol=0)
             (loss / 2).backward()
             (expected.loss / 2).backward()
-        for a, b in zip(student.parameters(), reference.parameters()):
+        for a, b in zip(student.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0)
         opt.step()
         refopt.step()
     assert ctx.algorithm_state["lanes"] == {}
     assert teacher.scale.grad is None
-    for a, b in zip(student.parameters(), reference.parameters()):
+    for a, b in zip(student.parameters(), reference.parameters(), strict=True):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 

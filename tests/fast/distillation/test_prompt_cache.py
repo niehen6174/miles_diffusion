@@ -3,12 +3,7 @@ import json
 import pytest
 import torch
 
-from miles.distillation.prompt_cache import (
-    ShardedConditions,
-    atomic_json,
-    file_sha256,
-    split_encoded_batch,
-)
+from miles.distillation.prompt_cache import ShardedConditions, atomic_json, file_sha256, split_encoded_batch
 
 
 def test_batch_unpadding_keeps_each_prompt_and_geometry():

@@ -209,7 +209,7 @@ def main():
     checkpoint.finalize_load(actor, payload)
     assert actor.global_step == 8 and args.start_rollout_id == 1
     assert torch.equal(torch.get_rng_state(), saved_rng)
-    assert all(torch.equal(a, b) for a, b in zip(torch.cuda.get_rng_state_all(), saved_cuda))
+    assert all(torch.equal(a, b) for a, b in zip(torch.cuda.get_rng_state_all(), saved_cuda, strict=True))
     for name, p in full(model).items():
         torch.testing.assert_close(p, saved[name], rtol=0, atol=0)
     # Optimizer moments must survive too; compare the next update with the uninterrupted reference.
