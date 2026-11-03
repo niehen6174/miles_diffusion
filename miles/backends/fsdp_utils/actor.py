@@ -191,6 +191,11 @@ class FSDPTrainRayActor(TrainRayActor):
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
         self.global_step = 0
         self.micro_step = 0
+        self.pdd_signature = None
+        if args.loss_type == "pdd":
+            from miles.distillation.integration import resume_signature
+
+            self.pdd_signature = resume_signature(args)
 
         self.ema_optimizer = None
         if args.use_ema:
@@ -340,6 +345,12 @@ class FSDPTrainRayActor(TrainRayActor):
         train_pairs: list = rollout_data["train_data"]
         if not train_pairs:
             raise ValueError("rollout_data['train_data'] is empty")
+        if self.args.loss_type == "pdd":
+            from miles.distillation.integration import expand_trajectories
+
+            train_pairs = expand_trajectories(
+                train_pairs, intervals=self.args.pdd_num_intervals, block_size=self.args.pdd_block_size
+            )
 
         num_pairs = len(train_pairs)
 
@@ -427,7 +438,14 @@ class FSDPTrainRayActor(TrainRayActor):
                     sigma_buckets=self.args.log_loss_sigma_bucket,
                 )
 
-                for pair_lo, pair_hi in microbatch_ranges:
+                for accumulation_index, (pair_lo, pair_hi) in enumerate(microbatch_ranges):
+                    if self.args.loss_type == "pdd" and self.args.fsdp_cpu_offload and dist.get_world_size() == 1:
+                        # Keep FP32 accumulated gradients on GPU until this window
+                        # ends. Otherwise CPU offload copies the entire model's
+                        # gradients to host after every microbatch. Scope this to
+                        # the validated single-rank PDD path; optimizer stays on CPU.
+                        for model in self.models.values():
+                            model.set_requires_gradient_sync(accumulation_index == len(microbatch_ranges) - 1)
                     chunk = train_pairs[pair_lo:pair_hi]
                     loss_ctx.microbatch_id = microbatch_id
                     microbatch_id += 1
@@ -460,6 +478,9 @@ class FSDPTrainRayActor(TrainRayActor):
 
                 reduced = {f"train/{key}": value for key, value in metrics.reduce().items()}
                 self._log_metrics(rollout_id, reduced, step=self.global_step)
+
+        if self.args.loss_type == "pdd" and loss_ctx.algorithm_state.get("lanes"):
+            raise RuntimeError("PDD rollout ended with unfinished trajectories; refusing checkpoint boundary")
 
     def _maybe_legacy_window_pad_len(self, train_pairs: list, microbatch_ranges: list) -> int | None:
         """LEGACY 2D parity: the whole-window max cond seq_len (like the legacy tile path), or
