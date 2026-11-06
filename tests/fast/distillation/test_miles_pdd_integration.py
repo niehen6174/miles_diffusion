@@ -99,9 +99,9 @@ def test_eight_optimizer_updates_match_reference_and_carry_preupdate_states():
                 ref_pred=None,
                 metrics=Metrics(),
             )
-            torch.testing.assert_close(loss, expected.loss, rtol=0, atol=0)
+            torch.testing.assert_close(loss, expected.sum(), rtol=0, atol=0)
             (loss / 2).backward()
-            (expected.loss / 2).backward()
+            (expected.sum() / 2).backward()
         for a, b in zip(student.parameters(), reference.parameters(), strict=True):
             torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0)
         opt.step()
@@ -129,7 +129,7 @@ def test_heads_installed_on_meta_before_sharding():
         model = nn.Module()
         model.proj_out = nn.Linear(4, 2)
     model.config = SimpleNamespace(patch_size=1, in_channels=2)
-    install_student(model, SimpleNamespace(pdd_num_intervals=32, pdd_init_checkpoint=None), materialize_weights=False)
+    install_student(model, SimpleNamespace(pdd_num_intervals=32))
     assert all(p.is_meta for p in model.parameters())
     assert model.proj_out.parallel.weight.shape == (32, 2, 4)
 

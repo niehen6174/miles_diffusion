@@ -119,8 +119,8 @@ def pdd_loss_formula(
 
     start, selected, grid = (prepared.extras[k] for k in ("start", "selected", "grid"))
     with torch.autocast(ctx.device.type, dtype=ctx.forward_dtype, enabled=ctx.forward_dtype != torch.float32):
-        result = pdd_loss(predictions, x, grid, start, selected, teacher_forward, solver="midpoint")
-    if not torch.isfinite(result.loss):
+        per_sample_loss = pdd_loss(predictions, x, grid, start, selected, teacher_forward, solver="midpoint")
+    if not torch.isfinite(per_sample_loss).all():
         raise FloatingPointError("nonfinite PDD loss")
     end = start + ctx.args.pdd_block_size
     with torch.no_grad():
@@ -136,6 +136,6 @@ def pdd_loss_formula(
             metrics.emit_mean("pdd_update_relative_error", total=relative, count=1)
         elif end < n:
             ctx.algorithm_state["lanes"][prepared.extras["lane"]] = {"state": following, "next_start": end}
-        loss_sum = result.per_sample_loss.sum()
+        loss_sum = per_sample_loss.sum()
         metrics.emit_mean("loss", total=loss_sum.detach(), count=len(batch))
-    return result.per_sample_loss.sum()
+    return per_sample_loss.sum()

@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from miles.distillation.integration import engine_timesteps, make_grid
-from miles.distillation.pdd import ParallelLinear, validate_grid
+from miles.distillation.pdd import ParallelLinear
 
 
 class PDDProjection(nn.Module):
@@ -59,7 +59,6 @@ def _copy_remote_replies_to_host():
 
 def apply():
     from sglang.multimodal_gen.configs.pipeline_configs.qwen_image21 import QwenImage21PipelineConfig
-    from sglang.multimodal_gen.runtime.distributed import get_sp_world_size, get_tp_world_size
     from sglang.multimodal_gen.runtime.models.dits.qwen_image21 import QwenImage21Transformer2DModel
     from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.qwen_image21 import (
         QwenImage21DenoisingStage,
@@ -73,12 +72,10 @@ def apply():
     original_prepare = QwenImage21DenoisingStage._prepare_denoising_loop
     original_step = QwenImage21DenoisingStage._run_denoising_step
 
+    # Request and engine-size settings are validated by Miles' PDD arguments; the
+    # checks here cover the patch's own constants and server-only options.
     def post_load(self):
         original_load(self)
-        if get_sp_world_size() != 1 or get_tp_world_size() != 1:
-            raise ValueError("PDD online currently requires TP=SP=1")
-        if next(self.parameters()).dtype != torch.float32:
-            raise ValueError("PDD online requires --sglang-dit-precision fp32")
         if not isinstance(self.proj_out, PDDProjection):
             self.proj_out = PDDProjection(self.proj_out)
 
@@ -87,13 +84,8 @@ def apply():
             return original_time(self, batch, server_args)
         if (batch.height, batch.width, batch.num_inference_steps) != (1024, 1024, 8):
             raise ValueError("PDD online requires 1024x1024 and 8 steps")
-        if batch.do_classifier_free_guidance or batch.image_latent is not None:
-            raise ValueError("PDD online supports unguided T2I only")
-        if batch.rollout and (batch.rollout_sde_type != "ode" or batch.rollout_noise_level != 0):
-            raise ValueError("PDD online requires deterministic ODE rollout")
         batch = original_time(self, batch, server_args)
         grid = make_grid(server_args.model_path, 32, 4096, batch.timesteps.device)
-        validate_grid(grid)
         batch.timesteps = engine_timesteps(grid[:-1:4]).to(grid.device)
         batch.scheduler.timesteps = batch.timesteps
         batch.scheduler.sigmas = grid[::4]

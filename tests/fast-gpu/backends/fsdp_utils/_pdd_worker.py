@@ -22,8 +22,8 @@ from miles.backends.fsdp_utils.loss_hub.pdd import pdd_loss_formula, prepare_pdd
 from miles.backends.fsdp_utils.loss_hub.types import DiffusionLossContext
 from miles.backends.fsdp_utils.model_backend import DiffusersModelBackend
 from miles.backends.fsdp_utils.model_loader import load_fsdp_models
+from miles.distillation.integration import install_student
 from miles.distillation.pdd import block_update, pdd_loss
-from miles.distillation.qwen_image21_pdd import QwenImage21PDDStudent
 
 
 def tiny(dtype=torch.float32):
@@ -75,7 +75,6 @@ def main():
         use_lora=False,
         pdd_num_intervals=32,
         pdd_block_size=4,
-        pdd_init_checkpoint=None,
         offload_train=False,
         diffusion_height=64,
         diffusion_width=64,
@@ -95,8 +94,9 @@ def main():
     teachers = load_fsdp_models(args, backend, config, parallel, checkpoint_path="tiny", trainable=False)
     model = models["transformer"]
     teacher = teachers["transformer"]
-    reference = QwenImage21PDDStudent(tiny().to(device), 32)
-    reference.transformer.load_state_dict(full(model))
+    reference = tiny().to(device)
+    install_student(reference, args)
+    reference.load_state_dict(full(model))
     refteacher = tiny(torch.bfloat16).to(device).eval().requires_grad_(False)
     refteacher.load_state_dict(full(teacher))
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0, foreach=False)
@@ -143,7 +143,9 @@ def main():
                 guidance_scale=1.0,
                 true_cfg_scale=1.0,
             )
-            refpred = reference(x, grid[start], **cond)
+            # Unsharded student: keep the image-token tail, split into [head, batch, token, channel].
+            refpred = reference(hidden_states=x, timestep=grid[start].expand(1), return_dict=False, **cond)[0]
+            refpred = refpred[:, -16:].reshape(1, 16, 32, 4).permute(2, 0, 1, 3)
             loss = pdd_loss_formula(
                 ctx, [pair], prepared, new_pred=pred, old_pred=None, ref_pred=None, metrics=Metrics()
             )
@@ -157,7 +159,7 @@ def main():
                     :, -16:
                 ].float()
 
-            refloss = pdd_loss(refpred, x, grid, start, prepared.extras["selected"], tf).loss
+            refloss = pdd_loss(refpred, x, grid, start, prepared.extras["selected"], tf).sum()
         rawref = refpred.permute(1, 2, 0, 3).flatten(2)
         err = (pred["visual"] - rawref).abs().max().item()
         max_output = max(max_output, err)
@@ -166,9 +168,7 @@ def main():
         refstate = block_update(x, refpred, grid, start, start + 4).detach()
         loss.backward()
         refloss.backward()
-        for (name, p), (rname, r) in zip(
-            model.named_parameters(), reference.transformer.named_parameters(), strict=True
-        ):
+        for (name, p), (rname, r) in zip(model.named_parameters(), reference.named_parameters(), strict=True):
             assert name == rname and (p.grad is None) == (r.grad is None), name
             if p.grad is not None:
                 dist.all_reduce(r.grad)
@@ -180,7 +180,7 @@ def main():
         refopt.step()
     assert not ctx.algorithm_state["lanes"] and all(p.grad is None for p in teacher.parameters())
     for name, p in full(model).items():
-        torch.testing.assert_close(p, reference.transformer.state_dict()[name], rtol=2e-5, atol=2e-6, msg=name)
+        torch.testing.assert_close(p, reference.state_dict()[name], rtol=2e-5, atol=2e-6, msg=name)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
     actor = SimpleNamespace(
         args=args,
@@ -215,13 +215,13 @@ def main():
     # Optimizer moments must survive too; compare the next update with the uninterrupted reference.
     optimizer.zero_grad()
     refopt.zero_grad()
-    for p, r in zip(model.parameters(), reference.transformer.parameters(), strict=True):
+    for p, r in zip(model.parameters(), reference.parameters(), strict=True):
         p.grad = torch.ones_like(p)
         r.grad = torch.ones_like(r)
     optimizer.step()
     refopt.step()
     for name, p in full(model).items():
-        torch.testing.assert_close(p, reference.transformer.state_dict()[name], rtol=2e-5, atol=2e-6, msg=name)
+        torch.testing.assert_close(p, reference.state_dict()[name], rtol=2e-5, atol=2e-6, msg=name)
     if rank == 0:
         report = {
             "state": "passed",

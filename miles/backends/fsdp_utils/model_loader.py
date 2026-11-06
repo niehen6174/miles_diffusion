@@ -44,7 +44,7 @@ def load_fsdp_models(
         if is_pdd and trainable:
             from miles.distillation.integration import install_student
 
-            install_student(model, args, materialize_weights=materialize_weights)
+            install_student(model, args)
         if args.fsdp_attention_backend is not None:
             model_backend.set_attention_backend(model, args.fsdp_attention_backend)
         if trainable and args.gradient_checkpointing:

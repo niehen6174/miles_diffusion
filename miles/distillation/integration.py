@@ -9,9 +9,8 @@ from pathlib import Path
 
 import torch
 
-from .pdd import validate_grid
+from .pdd import ParallelLinear, validate_grid
 from .prompt_cache import file_sha256
-from .qwen_image21_pdd import TokenParallelProjection
 
 
 def make_grid(model_path, intervals, tokens, device="cpu"):
@@ -61,22 +60,23 @@ def embedded_sigmas(timesteps):
     return (timesteps.bfloat16() / 1000).float()
 
 
-def install_student(model, args, *, materialize_weights):
+class TokenParallelProjection(torch.nn.Module):
+    """Qwen-Image 2.1 output layer as N heads, emitted as [B, S, N*C] for the joint sequence."""
+
+    def __init__(self, source, num_intervals):
+        super().__init__()
+        self.parallel = ParallelLinear(source, num_intervals)
+
+    def forward(self, hidden):
+        return self.parallel(hidden).permute(1, 2, 0, 3).flatten(2)
+
+
+def install_student(model, args):
     if not isinstance(model.proj_out, torch.nn.Linear) or model.config.patch_size != 1:
         raise ValueError("PDD needs an unmodified Qwen-Image 2.1 transformer")
     if model.proj_out.out_features != model.config.in_channels:
         raise ValueError("PDD requires equal input and output latent channels")
     model.proj_out = TokenParallelProjection(model.proj_out, args.pdd_num_intervals)
-    if materialize_weights and args.pdd_init_checkpoint:
-        saved = torch.load(args.pdd_init_checkpoint, map_location="cpu", mmap=True, weights_only=True)
-        if saved["num_intervals"] != args.pdd_num_intervals or saved["resolution"] != args.diffusion_height:
-            raise ValueError("PDD initial checkpoint protocol mismatch")
-        grid = make_grid(args.hf_checkpoint, args.pdd_num_intervals, (args.diffusion_height // 16) ** 2)
-        torch.testing.assert_close(saved["grid"].cpu(), grid, rtol=0, atol=0)
-        state = saved["student"]
-        if not all(k.startswith("transformer.") for k in state):
-            raise ValueError("Expected experimental QwenImage21PDDStudent state dict")
-        model.load_state_dict({k.removeprefix("transformer."): v for k, v in state.items()}, strict=True)
 
 
 def expand_trajectories(pairs, *, intervals, block_size):

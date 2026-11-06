@@ -101,7 +101,6 @@ def worker(output):
     args = SimpleNamespace(
         pdd_num_intervals=32,
         pdd_block_size=4,
-        pdd_init_checkpoint=None,
         pdd_online=True,
         hf_checkpoint=str(model_path),
         diffusion_height=1024,
@@ -109,7 +108,7 @@ def worker(output):
         seed=42,
         update_weight_buffer_size=4096,
     )
-    install_student(student, args, materialize_weights=True)
+    install_student(student, args)
     train_config = QwenImage21TrainPipelineConfig()
     train_config.configure(args)
     for model in (student, teacher):

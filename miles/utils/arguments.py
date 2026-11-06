@@ -907,12 +907,6 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--pdd-train-cache", type=str, default=None, help="Verified sharded PDD training prompt cache"
             )
             parser.add_argument(
-                "--pdd-init-checkpoint",
-                type=str,
-                default=None,
-                help="Experimental PDD inference checkpoint; weights only, not optimizer resume",
-            )
-            parser.add_argument(
                 "--pdd-online",
                 action="store_true",
                 help="Experimental: SGLang rollout states, eight block updates per rollout, no prompt cache",

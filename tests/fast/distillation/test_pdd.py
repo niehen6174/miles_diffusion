@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch import nn
 
-from miles.distillation.pdd import ParallelLinear, pdd_loss, sample_pdd, shifted_sigma_grid, teacher_mean_velocity
+from miles.distillation.pdd import ParallelLinear, block_update, pdd_loss, teacher_mean_velocity
 
 
 @pytest.mark.parametrize("solver", ["euler", "midpoint"])
@@ -20,17 +20,17 @@ def test_target_uses_detached_student_state_and_signed_step(solver, descending):
         seen.append((state.detach().clone(), torch.is_grad_enabled()))
         return teacher_weight * state + time
 
-    result = pdd_loss(predictions, x, grid, 0, 1, teacher, solver=solver)
+    loss = pdd_loss(predictions, x, grid, 0, 1, teacher, solver=solver).mean()
     expected_state = x.detach() + (grid[1] - grid[0]) * predictions[0].detach()
     velocity = 0.5 * expected_state + grid[1]
     if solver == "midpoint":
         h = grid[2] - grid[1]
         velocity = 0.5 * (expected_state + h * 0.5 * velocity) + grid[1] + h * 0.5
-    torch.testing.assert_close(result.teacher_state, expected_state)
-    torch.testing.assert_close(result.target, velocity)
+    torch.testing.assert_close(seen[0][0], expected_state)
+    torch.testing.assert_close(loss, (predictions[1] - velocity).square().mean())
     assert len(seen) == (1 if solver == "euler" else 2)
     assert all(not enabled for _, enabled in seen)
-    result.loss.backward()
+    loss.backward()
     assert x.grad is None and teacher_weight.grad is None
     assert predictions.grad[0].count_nonzero() == 0
     assert predictions.grad[1].count_nonzero() > 0
@@ -48,20 +48,6 @@ def test_head_initialization_and_shared_backbone_gradient():
     assert hidden.grad.abs().sum() > 0
     assert head.weight.grad[2].abs().sum() > 0
     assert head.weight.grad[[0, 1, 3]].count_nonzero() == 0
-
-
-def test_sampler_clips_final_block_and_counts_backbone_calls():
-    grid = shifted_sigma_grid(5, 3)
-    calls = []
-
-    def student(x, time):
-        calls.append(float(time))
-        return torch.ones(5, *x.shape)
-
-    x = torch.zeros(2, 3)
-    torch.testing.assert_close(sample_pdd(student, x, grid, 2), -torch.ones_like(x))
-    assert len(calls) == 3
-    assert x.count_nonzero() == 0
 
 
 @pytest.mark.parametrize("descending", [False, True])
@@ -82,7 +68,9 @@ def test_oracle_mean_velocities_follow_exact_linear_ode_across_block_sizes(desce
         means = (right - left) / (grid[1:] - grid[:-1])
         return means[:, None, None] * state
 
-    actual = sample_pdd(oracle, initial, grid, block_size)
+    actual = initial
+    for start in range(0, 8, block_size):
+        actual = block_update(actual, oracle(actual, grid[start]), grid, start, start + block_size)
     expected = initial * torch.exp(a * (grid[-1] - grid[0]))
     torch.testing.assert_close(actual, expected, rtol=1e-12, atol=1e-12)
 

@@ -75,11 +75,8 @@ python train_sft.py \
   --save "$OUTPUT/ckpt" --save-interval 1 --skip-eval-before-train
 ```
 
-This recipe uses two GPUs and eight trajectories per rollout. By default, all
-student heads start from the base model's output projection. An existing
-compatible PDD weights file can be passed with `--pdd-init-checkpoint /path/to/export.pt`
-for weights-only initialization with a fresh optimizer. Export tooling is outside
-this training change.
+This recipe uses two GPUs and eight trajectories per rollout. All student heads
+start from the base model's output projection.
 
 For single-GPU CPU offload, change both GPU-count arguments to `1` and add
 `--fsdp-cpu-offload`. To resume, rerun the command with `--load "$OUTPUT/ckpt"`
@@ -102,10 +99,8 @@ Tests cover detached teacher supervision, selected-head gradients, signed
 nonuniform grids, trajectory carry, prompt-cache integrity and unsupported
 configurations. The GPU suite compares tiny-model FSDP updates with an unsharded
 reference and verifies checkpoint restoration and the next update on one and two
-ranks. The two-rank case skips when fewer than two GPUs are available. A separate
-case checks CPU-offloaded accumulated gradients and AdamW updates against eager
-execution. All GPU cases skip when CUDA is unavailable; pytest manages temporary
-checkpoint directories.
+ranks. The two-rank case skips when fewer than two GPUs are available. All GPU
+cases skip when CUDA is unavailable; pytest manages temporary checkpoint directories.
 
 These are correctness checks, not image-quality claims. Automatic image metrics,
 historical datasets/reports and experiment orchestration are outside this change.
@@ -125,7 +120,7 @@ There is no critic, reward loss or carried state. Block j's state was produced b
 rollout weights, j updates before the weights it trains (cached mode: one update).
 The loss and gradients are unchanged; only the state distribution can differ, so
 measure that staleness before treating results as comparable. Its version-2 resume
-signature rejects cached-mode checkpoints. Weights-only PDD initialization remains possible.
+signature rejects cached-mode checkpoints.
 
 Use `train_diffusion.py` with the model/optimizer arguments above, omit
 `--train-only` and `--pdd-train-cache`, and replace the rollout settings with:

@@ -438,14 +438,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     sigma_buckets=self.args.log_loss_sigma_bucket,
                 )
 
-                for accumulation_index, (pair_lo, pair_hi) in enumerate(microbatch_ranges):
-                    if self.args.loss_type == "pdd" and self.args.fsdp_cpu_offload and dist.get_world_size() == 1:
-                        # Keep FP32 accumulated gradients on GPU until this window
-                        # ends. Otherwise CPU offload copies the entire model's
-                        # gradients to host after every microbatch. Scope this to
-                        # the validated single-rank PDD path; optimizer stays on CPU.
-                        for model in self.models.values():
-                            model.set_requires_gradient_sync(accumulation_index == len(microbatch_ranges) - 1)
+                for pair_lo, pair_hi in microbatch_ranges:
                     chunk = train_pairs[pair_lo:pair_hi]
                     loss_ctx.microbatch_id = microbatch_id
                     microbatch_id += 1
