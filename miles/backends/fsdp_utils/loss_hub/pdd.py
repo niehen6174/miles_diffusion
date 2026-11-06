@@ -2,7 +2,7 @@
 
 import torch
 
-from miles.distillation.integration import make_grid
+from miles.distillation.integration import embedded_sigmas, engine_timesteps, make_grid
 from miles.distillation.pdd import block_update, pdd_loss
 from miles.utils.hash_utils import stable_hash
 
@@ -57,13 +57,8 @@ def prepare_pdd_batch(ctx, batch, *, pad_to_len=None):
     }
     model_sigma = grid[start].reshape(1)
     if online:
-        from miles.backends.sglang_diffusion_utils.monkey_patches.patch_pdd_qwen_image21 import (
-            embedded_sigmas,
-            train_matched_timesteps,
-        )
-
         # The student sees the time value SGLang embedded; the grid dynamics stay unchanged.
-        model_sigma = embedded_sigmas(train_matched_timesteps(model_sigma)).to(ctx.device)
+        model_sigma = embedded_sigmas(engine_timesteps(model_sigma)).to(ctx.device)
     return PreparedBatch(
         latents={"visual": state},
         timesteps={"visual": grid[start].reshape(1)},

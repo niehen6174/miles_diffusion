@@ -4,6 +4,7 @@ Version 1 checkpoints only at full-trajectory (rollout) boundaries. Eight optimi
 updates carry detached pre-update states; no trajectory is discarded on resume.
 """
 
+import functools
 from pathlib import Path
 
 import torch
@@ -14,6 +15,11 @@ from .qwen_image21_pdd import TokenParallelProjection
 
 
 def make_grid(model_path, intervals, tokens, device="cpu"):
+    return _cached_grid(str(model_path), intervals, tokens).to(device, copy=True)
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_grid(model_path, intervals, tokens):
     import numpy as np
     from diffusers import FlowMatchEulerDiscreteScheduler
     from diffusers.pipelines.qwenimage21.pipeline_qwenimage21 import calculate_shift
@@ -23,10 +29,36 @@ def make_grid(model_path, intervals, tokens, device="cpu"):
     )
     cfg = scheduler.config
     mu = calculate_shift(tokens, cfg.base_image_seq_len, cfg.max_image_seq_len, cfg.base_shift, cfg.max_shift)
-    scheduler.set_timesteps(intervals, device=device, sigmas=np.linspace(1.0, 1.0 / intervals, intervals), mu=mu)
+    scheduler.set_timesteps(intervals, sigmas=np.linspace(1.0, 1.0 / intervals, intervals), mu=mu)
     grid = scheduler.sigmas.float()
     validate_grid(grid)
     return grid
+
+
+def engine_timesteps(sigmas):
+    """SGLang timesteps whose BF16 time-embedding input equals the trainer's.
+
+    Under BF16 autocast the native DiT embeds ``bf16(bf16(t) / 1000)``, while the
+    Diffusers trainer embeds ``bf16(sigma)``; ``t = 1000 * sigma`` can round to a
+    different value. Pick the representable ``t`` nearest ``1000 * sigma`` that
+    lands on the trainer's value, or the nearest reachable value when none does;
+    the online trainer then feeds ``embedded_sigmas`` of that choice.
+    """
+    result = []
+    for sigma in sigmas.detach().float().cpu():
+        target = float(sigma.bfloat16())
+        center = float(sigma) * 1000
+        candidates = torch.arange(center - 16, center + 16, 1 / 16).bfloat16().unique().float()
+        miss = ((candidates.bfloat16() / 1000).float() - target).abs()
+        # Lexicographic: embedding mismatch first, then distance from 1000 * sigma.
+        best = torch.argmin(miss * 1e6 + (candidates - center).abs())
+        result.append(candidates[best])
+    return torch.stack(result)
+
+
+def embedded_sigmas(timesteps):
+    """The sigma the native SGLang DiT embeds for ``timesteps`` under BF16 autocast."""
+    return (timesteps.bfloat16() / 1000).float()
 
 
 def install_student(model, args, *, materialize_weights):

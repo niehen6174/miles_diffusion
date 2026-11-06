@@ -8,6 +8,7 @@ No fused-head cache or exported checkpoint is needed for online weight sync.
 import torch
 from torch import nn
 
+from miles.distillation.integration import engine_timesteps, make_grid
 from miles.distillation.pdd import ParallelLinear, validate_grid
 
 
@@ -30,36 +31,13 @@ class PDDProjection(nn.Module):
             return delta / (self.grid[start + 4] - self.grid[start])
 
 
-def train_matched_timesteps(sigmas):
-    """Engine timesteps whose BF16 time-embedding input equals the trainer's.
-
-    Under BF16 autocast the native DiT embeds ``bf16(bf16(t) / 1000)``, while the
-    Diffusers trainer embeds ``bf16(sigma)``; ``t = 1000 * sigma`` can round to a
-    different value. Pick the representable ``t`` nearest ``1000 * sigma`` that
-    lands on the trainer's value, or the nearest reachable value when none does;
-    the trainer then feeds ``embedded_sigmas`` of that choice, so both sides agree.
-    """
-    result = []
-    for sigma in sigmas.detach().float().cpu():
-        target = float(sigma.bfloat16())
-        center = float(sigma) * 1000
-        candidates = torch.arange(center - 16, center + 16, 1 / 16).bfloat16().unique().float()
-        miss = ((candidates.bfloat16() / 1000).float() - target).abs()
-        # Lexicographic: embedding mismatch first, then distance from 1000 * sigma.
-        best = torch.argmin(miss * 1e6 + (candidates - center).abs())
-        result.append(candidates[best])
-    return torch.stack(result)
-
-
-def embedded_sigmas(timesteps):
-    """The sigma the native DiT embeds for engine ``timesteps`` under BF16 autocast."""
-    return (timesteps.bfloat16() / 1000).float()
-
-
 def _copy_remote_replies_to_host():
     """Scheduler replies wrap CUDA tensors in IPC handles unconditionally, but the
     client rebuilds them only for loopback endpoints; Miles binds the engine to the
     node IP, so the rollout API would receive raw handles. Send host copies instead.
+
+    Temporary: drop once the engine's SGLang gates ``spill_cuda_tensors`` on
+    ``is_local_endpoint`` (fix on niehen6174/sglang fix/diffusion-remote-cuda-reply).
     """
     from sglang.multimodal_gen.runtime.distributed import ipc_cuda
     from sglang.multimodal_gen.runtime.ipc_array import is_local_endpoint
@@ -87,8 +65,6 @@ def apply():
         QwenImage21DenoisingStage,
     )
     from sglang.multimodal_gen.runtime.pipelines_core.stages.timestep_preparation import TimestepPreparationStage
-
-    from miles.distillation.integration import make_grid
 
     if getattr(QwenImage21DenoisingStage, "_miles_pdd_online", False):
         return
@@ -118,7 +94,7 @@ def apply():
         batch = original_time(self, batch, server_args)
         grid = make_grid(server_args.model_path, 32, 4096, batch.timesteps.device)
         validate_grid(grid)
-        batch.timesteps = train_matched_timesteps(grid[:-1:4]).to(grid.device)
+        batch.timesteps = engine_timesteps(grid[:-1:4]).to(grid.device)
         batch.scheduler.timesteps = batch.timesteps
         batch.scheduler.sigmas = grid[::4]
         batch.extra["pdd_grid"] = grid

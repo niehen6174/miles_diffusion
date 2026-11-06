@@ -26,11 +26,11 @@ def test_online_stage_train_sync(tmp_path):
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["updates"] == 16 and report["teacher_frozen"]
     assert report["weights_exact"] and report["next_rollout_changed"]
-    # Same weights, every block: 1000 * sigma timesteps alone gave 1.5-3% on blocks 2 and 4.
+    # Same weights, every block; mismatched BF16 timestep rounding gave 1.5-3% on blocks 2 and 4.
     assert max(max(r["pre_update_relative_error"]) for r in report["rollouts"]) < 5e-3
 
 
-def worker(output, naive_timesteps=False):
+def worker(output):
     import dataclasses
     import socket
 
@@ -98,8 +98,6 @@ def worker(output, naive_timesteps=False):
     )
     set_global_server_args(server)
     maybe_init_distributed_environment_and_model_parallel(tp_size=1, sp_size=1)
-    if naive_timesteps:  # manual A/B of the timestep rounding fix only
-        patch_pdd_qwen_image21.train_matched_timesteps = lambda sigmas: sigmas * 1000
     patch_pdd_qwen_image21.apply()
     patch_pdd_qwen_image21.apply()  # idempotent in scheduler workers
     torch.manual_seed(72)
@@ -293,7 +291,6 @@ def worker(output, naive_timesteps=False):
     assert not torch.equal(first.dit_trajectory.latents, sample.dit_trajectory.latents)
     report = dict(
         updates=sum(len(r["blocks"]) for r in rollouts),
-        naive_timesteps=naive_timesteps,
         teacher_frozen=True,
         weights_exact=True,
         next_rollout_changed=True,
@@ -307,4 +304,4 @@ def worker(output, naive_timesteps=False):
 
 
 if __name__ == "__main__":
-    worker(Path(sys.argv[1]), naive_timesteps="--naive-timesteps" in sys.argv[2:])
+    worker(Path(sys.argv[1]))

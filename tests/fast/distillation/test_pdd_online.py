@@ -16,12 +16,8 @@ from tests.fast.distillation.test_miles_pdd_integration import (
     valid_args,
 )
 
-from miles.backends.sglang_diffusion_utils.monkey_patches.patch_pdd_qwen_image21 import (
-    PDDProjection,
-    embedded_sigmas,
-    train_matched_timesteps,
-)
-from miles.distillation.integration import configure_args, expand_trajectories
+from miles.backends.sglang_diffusion_utils.monkey_patches.patch_pdd_qwen_image21 import PDDProjection
+from miles.distillation.integration import configure_args, embedded_sigmas, engine_timesteps, expand_trajectories
 from miles.distillation.pdd import block_update
 from miles.rollout import pdd_online
 
@@ -132,14 +128,14 @@ def test_engine_timesteps_reproduce_trainer_bf16_sigma():
     # Block starts that 1000 * sigma rounds away from the trainer's value.
     sigmas = torch.tensor([1.0, 0.956724, 0.904531, 0.840349, 0.759511, 0.654567, 0.512844, 0.310901])
     assert mismatch(sigmas * 1000, sigmas).max() > 0
-    assert mismatch(train_matched_timesteps(sigmas), sigmas).max() == 0
+    assert mismatch(engine_timesteps(sigmas), sigmas).max() == 0
     sweep = torch.linspace(1, 0.01, 2000)
-    fixed, naive = mismatch(train_matched_timesteps(sweep), sweep), mismatch(sweep * 1000, sweep)
+    fixed, naive = mismatch(engine_timesteps(sweep), sweep), mismatch(sweep * 1000, sweep)
     assert (fixed <= naive).all() and (fixed == 0).float().mean() > 0.95
     # Where no engine timestep reaches bf16(sigma), the trainer adopts the engine's value.
     unreachable = sweep[fixed > 0]
     assert unreachable.numel() > 0
-    embedded = embedded_sigmas(train_matched_timesteps(unreachable))
+    embedded = embedded_sigmas(engine_timesteps(unreachable))
     torch.testing.assert_close(embedded.bfloat16().float(), embedded, rtol=0, atol=0)
     assert (embedded - unreachable).abs().max() < 8e-3
 
