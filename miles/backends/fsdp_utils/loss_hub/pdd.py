@@ -23,7 +23,15 @@ def prepare_pdd_batch(ctx, batch, *, pad_to_len=None):
     lanes = runtime.setdefault("lanes", {})
     model = ctx.models["transformer"]
     shape = (1, (ctx.args.diffusion_height // 16) ** 2, model.config.in_channels)
-    if start == 0:
+    online = getattr(ctx.args, "pdd_online", False)
+    if online:
+        if start not in range(0, ctx.args.pdd_num_intervals, ctx.args.pdd_block_size):
+            raise ValueError("Invalid PDD rollout block index")
+        # Every block starts from the fixed-weight rollout; nothing is carried.
+        state = pair["pdd_trajectory"][start // ctx.args.pdd_block_size].to(ctx.device).unsqueeze(0).float()
+        if state.shape != shape or not torch.isfinite(state).all():
+            raise ValueError("Invalid PDD rollout latent shape or values")
+    elif start == 0:
         if lane in lanes:
             raise ValueError("PDD trajectory lane restarted before reaching its endpoint")
         generator = torch.Generator(device=ctx.device).manual_seed(
@@ -37,15 +45,29 @@ def prepare_pdd_batch(ctx, batch, *, pad_to_len=None):
         state = previous["state"]
     generator = torch.Generator().manual_seed(stable_hash("pdd-interval", ctx.args.seed, ctx.rollout_id, lane, start))
     selected = int(torch.randint(start, start + ctx.args.pdd_block_size, (), generator=generator))
-    condition = {k: v.to(ctx.device) if isinstance(v, torch.Tensor) else v for k, v in pair["cond_kwargs"].items()}
+    condition = (
+        ctx.train_pipeline_config.prepare_cond_kwargs(pair["denoising_env"].pos_cond_kwargs, ctx.device)
+        if online
+        else pair["cond_kwargs"]
+    )
+    condition = {k: v.to(ctx.device) if isinstance(v, torch.Tensor) else v for k, v in condition.items()}
     # Match the independent adapter's FP32 conditioning boundary; autocast controls matmuls.
     condition = {
         k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v for k, v in condition.items()
     }
+    model_sigma = grid[start].reshape(1)
+    if online:
+        from miles.backends.sglang_diffusion_utils.monkey_patches.patch_pdd_qwen_image21 import (
+            embedded_sigmas,
+            train_matched_timesteps,
+        )
+
+        # The student sees the time value SGLang embedded; the grid dynamics stay unchanged.
+        model_sigma = embedded_sigmas(train_matched_timesteps(model_sigma)).to(ctx.device)
     return PreparedBatch(
         latents={"visual": state},
         timesteps={"visual": grid[start].reshape(1)},
-        timesteps_for_model={"visual": grid[start].reshape(1)},
+        timesteps_for_model={"visual": model_sigma},
         model=model,
         component_name="transformer",
         guidance_scale=1.0,
@@ -110,7 +132,14 @@ def pdd_loss_formula(
         following = block_update(x, predictions, grid, start, end).detach()
         if not torch.isfinite(following).all():
             raise FloatingPointError("nonfinite PDD trajectory")
-        if end < n:
+        if getattr(ctx.args, "pdd_online", False):
+            expected = batch[0]["pdd_trajectory"][end // ctx.args.pdd_block_size].to(ctx.device).unsqueeze(0).float()
+            error = (following - expected).abs()
+            metrics.emit_mean("pdd_next_latent_mae", total=error.sum(), count=error.numel())
+            # A relative update error exposes small-state/large-update cases too.
+            relative = error.mean() / (expected - x).abs().mean().clamp_min(1e-6)
+            metrics.emit_mean("pdd_update_relative_error", total=relative, count=1)
+        elif end < n:
             ctx.algorithm_state["lanes"][prepared.extras["lane"]] = {"state": following, "next_start": end}
         loss_sum = result.per_sample_loss.sum()
         metrics.emit_mean("loss", total=loss_sum.detach(), count=len(batch))

@@ -79,22 +79,30 @@ def resume_signature(args):
         "adam_eps",
         "clip_grad",
     )
-    return {
-        "version": 1,
-        "boundary": "complete_trajectory",
+    online = getattr(args, "pdd_online", False)
+    signature = {
+        "version": 2 if online else 1,
+        "boundary": "rollout_trajectory" if online else "complete_trajectory",
         "settings": {k: getattr(args, k) for k in fields},
-        "cache_manifest_sha256": file_sha256(Path(args.pdd_train_cache) / "manifest.json"),
+        "cache_manifest_sha256": None if online else file_sha256(Path(args.pdd_train_cache) / "manifest.json"),
         "prompt_sha256": file_sha256(args.prompt_data),
         "grid": make_grid(args.hf_checkpoint, args.pdd_num_intervals, (args.diffusion_height // 16) ** 2).tolist(),
     }
+    if online:
+        signature["online_settings"] = {
+            key: getattr(args, key)
+            for key in ("rollout_seed", "diffusion_num_steps", "diffusion_generator_device", "diffusion_quality")
+        }
+    return signature
 
 
 def configure_args(args):
     """Narrow, validated first integration; unsupported modes fail before loading GPUs."""
     if args.diffusion_model_family != "qwen_image21" or args.diffusion_task != "t2i":
         raise ValueError("PDD v1 supports Qwen-Image 2.1 T2I only")
-    if not args.train_only or args.train_backend != "fsdp":
-        raise ValueError("PDD v1 requires --train-only --train-backend fsdp")
+    online = getattr(args, "pdd_online", False)
+    if args.train_only == online or args.train_backend != "fsdp":
+        raise ValueError("PDD requires FSDP; use --train-only for cached mode, --pdd-online for SGLang")
     if args.update_weight_target_modules != ["transformer"]:
         raise ValueError("PDD v1 trains only the transformer component")
     if (args.pdd_num_intervals, args.pdd_block_size) != (32, 4):
@@ -109,11 +117,15 @@ def configure_args(args):
         raise ValueError("PDD v1 uses full student weights and a frozen teacher; no LoRA, EMA or reference model")
     if args.teacher_lora_adapter_paths or args.lora_adapter_paths:
         raise ValueError("PDD v1 does not accept LoRA adapters")
-    if args.diffusion_recompute_old_log_prob or args.diffusion_kl_beta or args.eval_interval is not None:
+    if (
+        args.diffusion_recompute_old_log_prob
+        or args.diffusion_kl_beta
+        or (args.eval_interval is not None and not online)
+    ):
         raise ValueError("PDD v1 does not use RL log probabilities, KL or rollout evaluation")
     if args.diffusion_guidance_scale != 1 or args.diffusion_true_cfg_scale not in (None, 1):
         raise ValueError("PDD v1 requires CFG=1")
-    if not args.pdd_train_cache or not args.prompt_data or not args.rollout_global_dataset:
+    if (not online and not args.pdd_train_cache) or not args.prompt_data or not args.rollout_global_dataset:
         raise ValueError("PDD requires --pdd-train-cache, --prompt-data and the global dataset")
     if args.n_samples_per_prompt != 1:
         raise ValueError("PDD requires --n-samples-per-prompt 1")
@@ -132,6 +144,13 @@ def configure_args(args):
         "custom_prepare_train_batch_path": "miles.backends.fsdp_utils.loss_hub.pdd.prepare_pdd_batch",
         "custom_loss_function_path": "miles.backends.fsdp_utils.loss_hub.pdd.pdd_loss_formula",
     }
+    if online:
+        configure_online_args(args)
+        paths.update(
+            rollout_function_path="miles.rollout.sglang_diffusion_rollout.generate_rollout",
+            custom_convert_samples_to_train_data_path="miles.rollout.pdd_online.convert_samples_to_train_data",
+            custom_rm_path="miles.rollout.pdd_online.no_reward",
+        )
     for key, value in paths.items():
         old = getattr(args, key)
         if old not in (None, value, "miles.rollout.sglang_rollout.generate_rollout"):
@@ -143,3 +162,23 @@ def configure_args(args):
     if args.global_batch_size not in (None, args.rollout_batch_size):
         raise ValueError("PDD global batch size equals the number of trajectory lanes (rollout batch size)")
     args.global_batch_size = args.rollout_batch_size
+
+
+def configure_online_args(args):
+    """Fail closed for unvalidated engine features and incompatible sample hooks."""
+    if args.diffusion_num_steps != 8 or args.diffusion_eval_num_steps not in (None, 8):
+        raise ValueError("PDD online requires 8 training/evaluation steps")
+    if args.pdd_train_cache:
+        raise ValueError("PDD online encodes prompts in SGLang; omit --pdd-train-cache")
+    if args.diffusion_sde_type != "ode" or args.diffusion_noise_level != 0:
+        raise ValueError("PDD online requires --diffusion-sde-type ode --diffusion-noise-level 0")
+    if args.rollout_num_gpus_per_engine != 1 or args.rollout_microgroup_size != 1:
+        raise ValueError("PDD online requires one GPU per engine and rollout microgroup size 1")
+    if args.sglang_dit_precision != "fp32":
+        raise ValueError("PDD online requires --sglang-dit-precision fp32")
+    if args.diffusion_step_strategy_path or args.custom_generate_function_path or args.group_rm:
+        raise ValueError("PDD online requires the standard full-trajectory rollout without custom generation/group RM")
+    if args.rollout_patch_groups not in (None, [], ["pdd_qwen_image21"]):
+        raise ValueError("PDD online requires only the pdd_qwen_image21 rollout patch group")
+    args.rollout_patch_groups = ["pdd_qwen_image21"]
+    args.rollout_return_full_trajectory = True

@@ -3,7 +3,8 @@
 This implementation adds Parallel Decoding Distillation (PDD) for Qwen-Image 2.1
 to the existing `train_sft.py` lifecycle. It reuses the Ray actors, FSDP2 loader,
 prepare/loss hooks, optimizer, dataset cursor and distributed checkpoints.
-It does not add a separate training loop or modify SGLang inference.
+The cached mode keeps this lifecycle. An opt-in experimental online mode uses
+`train_diffusion.py`, SGLang rollout and the existing FSDP-to-engine weight sync.
 
 ## Supported configuration
 
@@ -21,7 +22,7 @@ the carried state uses the prediction made before that block's optimizer update.
 Data-parallel splitting happens before trajectory expansion, keeping each lane
 on the same rank for all eight updates.
 
-The PDD loader preserves the Diffusers computation and precision used to train
+The cached PDD loader preserves the Diffusers computation and precision used to train
 the student. The existing post-load transformation for SGLang alignment is not
 applied in this mode. Other loss modes retain their existing behavior.
 
@@ -106,6 +107,64 @@ case checks CPU-offloaded accumulated gradients and AdamW updates against eager
 execution. All GPU cases skip when CUDA is unavailable; pytest manages temporary
 checkpoint directories.
 
-These are correctness checks, not image-quality claims. This change does not
-include SGLang serving, online weight synchronization, automatic image metrics,
-historical datasets/reports or experiment orchestration.
+These are correctness checks, not image-quality claims. Automatic image metrics,
+historical datasets/reports and experiment orchestration are outside this change.
+
+## Experimental SGLang online mode
+
+`--pdd-online` keeps the eight block-ordered updates but takes the block states
+from SGLang:
+
+1. The shared SGLang rollout generates all eight blocks with fixed student weights.
+2. After DP splitting, each trajectory expands into its eight blocks, as in cached mode.
+3. Update j recomputes the 32 heads from the rollout state at block j, selects one of
+   its four intervals, obtains the frozen teacher's midpoint target and steps once.
+4. After the eight updates the normal driver synchronizes the student back to SGLang.
+
+There is no critic, reward loss or carried state. Block j's state was produced by the
+rollout weights, j updates before the weights it trains (cached mode: one update).
+The loss and gradients are unchanged; only the state distribution can differ, so
+measure that staleness before treating results as comparable. Its version-2 resume
+signature rejects cached-mode checkpoints. Weights-only PDD initialization remains possible.
+
+Use `train_diffusion.py` with the model/optimizer arguments above, omit
+`--train-only` and `--pdd-train-cache`, and replace the rollout settings with:
+
+```bash
+--pdd-online --num-steps-per-rollout 8 \
+--diffusion-num-steps 8 --diffusion-eval-num-steps 8 \
+--diffusion-sde-type ode --diffusion-noise-level 0 \
+--rollout-num-gpus-per-engine 1 --rollout-microgroup-size 1 \
+--sglang-dit-precision fp32
+```
+
+Use the repository's normal rollout placement/offload options for the available
+hardware. This is a configuration sketch, not a validated full-model launch recipe.
+The online path encodes prompts in SGLang and does not consume a prompt cache.
+The `pdd_qwen_image21` patch group is selected automatically. It replaces the
+output projection and supplies the 32-interval grid subsampled at block boundaries.
+The projection returns the interval-weighted block-average velocity; the native
+ODE scheduler advances the latent and records the normal trajectory response.
+The native Transformer forward, timestep embeddings, norms and RoPE stay intact.
+Engine timesteps are chosen so that the native DiT's BF16 time-embedding input
+equals the trainer's `bf16(sigma)`; plain `1000 * sigma` rounds differently.
+When no engine timestep reaches that value, the online trainer feeds the student
+the engine's embedded value instead, so both sides always embed the same time.
+No export/reload script or fused-head cache participates in weight synchronization.
+
+The online FSDP loader applies the existing Qwen-Image 2.1 RoPE alignment hook.
+This does not establish exact BF16 forward parity: `pdd_next_latent_mae` and
+`pdd_update_relative_error` measure the recomputed block against SGLang's recorded
+next state before the optimizer step. Check these before extending training.
+The shared rollout's reward field is a zero placeholder, **not** a quality metric.
+
+```bash
+python -m pytest tests/fast/distillation/test_pdd_online.py
+python -m pytest tests/fast-gpu/backends/sglang_diffusion_utils/test_pdd_sglang_loop.py
+```
+
+The GPU smoke uses real native SGLang stages, the response parser, a one-rank
+FSDP tiny model, the PDD teacher loss, the Miles weight iterator and SGLang's
+weight receiver for two iterations. It does not exercise the HTTP/Ray driver,
+pretrained image quality or multi-GPU placement. TP/SP greater than one, dynamic
+batching, Cache-DiT and compiled/graph execution are not supported in this mode.

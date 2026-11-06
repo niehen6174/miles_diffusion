@@ -912,6 +912,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Experimental PDD inference checkpoint; weights only, not optimizer resume",
             )
+            parser.add_argument(
+                "--pdd-online",
+                action="store_true",
+                help="Experimental: SGLang rollout states, eight block updates per rollout, no prompt cache",
+            )
             parser.add_argument("--pdd-num-intervals", type=int, default=32)
             parser.add_argument("--pdd-block-size", type=int, default=4)
             parser.add_argument(
@@ -1878,6 +1883,8 @@ def miles_validate_args(args):
             f"{cfg_cls.__name__} trains --diffusion-task {list(cfg_cls.tasks)}, got {args.diffusion_task!r}"
         )
     cfg_cls.validate_args(args)
+    if getattr(args, "pdd_online", False) and args.loss_type != "pdd":
+        raise ValueError("--pdd-online requires --loss-type pdd")
     if args.loss_type == "pdd":
         from miles.distillation.integration import configure_args
 
