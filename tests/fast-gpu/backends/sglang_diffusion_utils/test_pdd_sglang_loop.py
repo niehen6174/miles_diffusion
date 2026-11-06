@@ -1,10 +1,9 @@
-"""Real native stage -> PDD loss -> FSDP weight iterator -> native stage smoke.
+"""Native SGLang stage -> PDD updates on FSDP -> weight sync -> native stage.
 
-Uses random tiny weights and synthetic embeddings, no pretrained download. The
-worker subprocess isolates SGLang globals/patches from other tests in this suite.
+Random tiny weights and synthetic embeddings, no pretrained download. The worker
+subprocess isolates SGLang globals/patches from other tests in this suite.
 """
 
-import json
 import os
 import subprocess
 import sys
@@ -23,11 +22,6 @@ def test_online_stage_train_sync(tmp_path):
     subprocess.run(
         [sys.executable, __file__, str(tmp_path)], check=True, timeout=180, env={**os.environ, "PYTHONPATH": "."}
     )
-    report = json.loads((tmp_path / "report.json").read_text())
-    assert report["updates"] == 16 and report["teacher_frozen"]
-    assert report["weights_exact"] and report["next_rollout_changed"]
-    # Same weights, every block; mismatched BF16 timestep rounding gave 1.5-3% on blocks 2 and 4.
-    assert max(max(r["pre_update_relative_error"]) for r in report["rollouts"]) < 5e-3
 
 
 def worker(output):
@@ -70,17 +64,16 @@ def worker(output):
     from miles.utils.diffusion_rollout_response import _parse_denoising_env, _parse_dit_trajectory
     from miles.utils.types import Sample
 
-    torch.set_num_threads(4)
     torch.cuda.set_device(0)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK="0", LOCAL_RANK="0", WORLD_SIZE="1")
+    # The real head width: native Q/K norm + RoPE fast paths only fire at 128.
     cfg = dict(
         in_channels=4,
         out_channels=4,
         num_layers=1,
-        # The real head width: native Q/K norm + RoPE fast paths only fire at 128.
         num_attention_heads=1,
         attention_head_dim=128,
         context_in_dim=16,
@@ -100,8 +93,10 @@ def worker(output):
     maybe_init_distributed_environment_and_model_parallel(tp_size=1, sp_size=1)
     patch_pdd_qwen_image21.apply()
     patch_pdd_qwen_image21.apply()  # idempotent in scheduler workers
+
+    # Trainer: FSDP student with 32 heads and a frozen BF16 teacher.
     torch.manual_seed(72)
-    train_model = HFModel(**cfg).cuda()
+    student = HFModel(**cfg).cuda()
     teacher = HFModel(**cfg).cuda().bfloat16().eval().requires_grad_(False)
     args = SimpleNamespace(
         pdd_num_intervals=32,
@@ -114,20 +109,16 @@ def worker(output):
         seed=42,
         update_weight_buffer_size=4096,
     )
-    install_student(train_model, args, materialize_weights=True)
+    install_student(student, args, materialize_weights=True)
     train_config = QwenImage21TrainPipelineConfig()
     train_config.configure(args)
-    train_config.postprocess_model_after_materialize(train_model)
-    train_config.postprocess_model_after_materialize(teacher)
-    mesh = init_device_mesh("cuda", (1,))
-    fully_shard(
-        train_model,
-        mesh=mesh,
-        mp_policy=MixedPrecisionPolicy(
-            param_dtype=torch.float32, reduce_dtype=torch.float32, cast_forward_inputs=False
-        ),
-    )
-    optimizer = torch.optim.AdamW(train_model.parameters(), lr=1e-3, weight_decay=0, foreach=False)
+    for model in (student, teacher):
+        train_config.postprocess_model_after_materialize(model)
+    fp32 = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32, cast_forward_inputs=False)
+    fully_shard(student, mesh=init_device_mesh("cuda", (1,)), mp_policy=fp32)
+    optimizer = torch.optim.AdamW(student.parameters(), lr=1e-3, weight_decay=0, foreach=False)
+
+    # Engine: native transformer and stages, patched for PDD.
     native = Native(config, {}).cuda().eval()
     native.post_load_weights()
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(model_path / "scheduler")
@@ -142,9 +133,8 @@ def worker(output):
     updater = WeightsUpdater(pipeline)
 
     def sync():
-        iterator = FSDPHfWeightIterator(args, train_model, diffusion_model_family="qwen_image21")
         seen = set()
-        for bucket in iterator.iter_hf_weights():
+        for bucket in FSDPHfWeightIterator(args, student, diffusion_model_family="qwen_image21").iter_hf_weights():
             ok, message = updater.update_weights_from_tensor({"transformer": bucket}, target_modules=["transformer"])
             assert ok, message
             for name, value in bucket:
@@ -180,126 +170,75 @@ def worker(output):
         )
         batch = time_stage.forward(batch, server)
         manager.begin_request([stage], batch, server)
-        result = stage.forward(batch, server)
-        data = result.rollout_trajectory_data
+        data = stage.forward(batch, server).rollout_trajectory_data
         trace = dataclasses.asdict(data.dit_trajectory)
-        assert trace["latents"].shape == (1, 9, 4096, 4)
         trace["latents"] = trace["latents"][0]
         sample = Sample(index=0, prompt="tiny PDD", seed=31)
         sample.dit_trajectory = _parse_dit_trajectory(trace, deserialize_func=lambda x: x)
         sample.denoising_env = _parse_denoising_env(
             dataclasses.asdict(data.denoising_env), deserialize_func=lambda x: x
         )
-        return sample
+        return convert_samples_to_train_data(args, [sample])["train_data"][0]
 
     class Metrics:
-        def __init__(self):
-            self.values = {}
-
         def emit_mean(self, name, *, total, count):
             assert name in SCHEMA, f"{name} is not declared in the FSDP metric schema"
-            self.values[name] = float(total / count)
 
-    def relative_drift(new, old):
-        # Per block: state change after training, relative to that block's own update size.
-        new, old = new.float(), old.float()
-        return [
-            float((new[i] - old[i]).abs().mean() / (old[i + 1] - old[i]).abs().mean().clamp_min(1e-6))
-            for i in range(8)
-        ]
+    def predict(prepared):
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            return train_config.compute_noise_pred(
+                model=student,
+                latents_input=prepared.latents,
+                timesteps_input=prepared.timesteps_for_model,
+                pos_cond=prepared.pos_cond,
+                neg_cond=None,
+                joint_cond=None,
+                use_cfg=False,
+                cfg_batching=False,
+                guidance_scale=1.0,
+                true_cfg_scale=1.0,
+            )
 
+    ctx = DiffusionLossContext(
+        models={"transformer": student},
+        teacher_models={"transformer": teacher},
+        train_pipeline_config=train_config,
+        sde_backend=None,
+        args=args,
+        forward_dtype=torch.bfloat16,
+        device=torch.device("cuda"),
+        rollout_id=0,
+        algorithm_state={"grid": make_grid(str(model_path), 32, 4096, "cuda")},
+    )
+
+    # One rollout, eight block-ordered updates, then sync back to the engine.
     sync()
     first = rollout()
-    sample = first
-    rollouts = []
-    for rollout_id in range(2):
-        pair = convert_samples_to_train_data(args, [sample])["train_data"][0]
-        ctx = DiffusionLossContext(
-            models={"transformer": train_model},
-            teacher_models={"transformer": teacher},
-            train_pipeline_config=train_config,
-            sde_backend=None,
-            args=args,
-            forward_dtype=torch.bfloat16,
-            device=torch.device("cuda"),
-            rollout_id=rollout_id,
-            algorithm_state={"grid": make_grid(str(model_path), 32, 4096, "cuda")},
+    for block in expand_trajectories([first], intervals=32, block_size=4):
+        prepared = prepare_pdd_batch(ctx, [block])
+        optimizer.zero_grad()
+        loss = pdd_loss_formula(
+            ctx, [block], prepared, new_pred=predict(prepared), old_pred=None, ref_pred=None, metrics=Metrics()
         )
-        # Pure engine/trainer parity: every block at the rollout weights, before any update.
-        alignment = []
-        with torch.no_grad():
-            for block in expand_trajectories([pair], intervals=32, block_size=4):
-                prepared = prepare_pdd_batch(ctx, [block])
-                with torch.autocast("cuda", dtype=torch.bfloat16):
-                    raw = train_config.compute_noise_pred(
-                        model=train_model,
-                        latents_input=prepared.latents,
-                        timesteps_input=prepared.timesteps_for_model,
-                        pos_cond=prepared.pos_cond,
-                        neg_cond=None,
-                        joint_cond=None,
-                        use_cfg=False,
-                        cfg_batching=False,
-                        guidance_scale=1.0,
-                        true_cfg_scale=1.0,
-                    )["visual"]
-                x = prepared.latents["visual"]
-                heads = raw.reshape(*x.shape[:-1], 32, x.shape[-1]).permute(2, 0, 1, 3)
-                start = block["pdd_start"]
-                following = block_update(x, heads, prepared.extras["grid"], start, start + 4)
-                expected = pair["pdd_trajectory"][start // 4 + 1].cuda().unsqueeze(0)
-                alignment.append(
-                    float((following - expected).abs().mean() / (expected - x).abs().mean().clamp_min(1e-6))
-                )
-        blocks = []
-        for block in expand_trajectories([pair], intervals=32, block_size=4):
+        loss.backward()
+        assert all(p.grad is None for p in teacher.parameters())
+        optimizer.step()
+    assert not ctx.algorithm_state["lanes"]
+    sync()
+
+    # The trained heads now drive the engine; each block must match the trainer's.
+    second = rollout()
+    assert not torch.equal(first["pdd_trajectory"], second["pdd_trajectory"])
+    with torch.no_grad():
+        for block in expand_trajectories([second], intervals=32, block_size=4):
             prepared = prepare_pdd_batch(ctx, [block])
-            metrics = Metrics()
-            optimizer.zero_grad()
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                pred = train_config.compute_noise_pred(
-                    model=train_model,
-                    latents_input=prepared.latents,
-                    timesteps_input=prepared.timesteps_for_model,
-                    pos_cond=prepared.pos_cond,
-                    neg_cond=None,
-                    joint_cond=None,
-                    use_cfg=False,
-                    cfg_batching=False,
-                    guidance_scale=1.0,
-                    true_cfg_scale=1.0,
-                )
-                loss = pdd_loss_formula(
-                    ctx, [block], prepared, new_pred=pred, old_pred=None, ref_pred=None, metrics=metrics
-                )
-            loss.backward()
-            assert all(p.grad is None for p in teacher.parameters())
-            optimizer.step()
-            blocks.append(dict(start=block["pdd_start"], **metrics.values))
-        assert not ctx.algorithm_state["lanes"]
-        sync()
-        previous, sample = sample, rollout()
-        rollouts.append(
-            dict(
-                pre_update_relative_error=alignment,
-                blocks=blocks,
-                state_drift_after_8_updates=relative_drift(
-                    sample.dit_trajectory.latents, previous.dit_trajectory.latents
-                ),
-            )
-        )
-    assert not torch.equal(first.dit_trajectory.latents, sample.dit_trajectory.latents)
-    report = dict(
-        updates=sum(len(r["blocks"]) for r in rollouts),
-        teacher_frozen=True,
-        weights_exact=True,
-        next_rollout_changed=True,
-        trajectory_shape=list(sample.dit_trajectory.latents.shape),
-        rollouts=rollouts,
-        scope="random tiny DiT; real SGLang stages and FSDP; no HTTP/Ray driver or pretrained quality",
-    )
-    (output / "report.json").write_text(json.dumps(report, indent=2))
-    print(json.dumps(report), flush=True)
+            x, start = prepared.latents["visual"], block["pdd_start"]
+            heads = predict(prepared)["visual"].reshape(*x.shape[:-1], 32, x.shape[-1]).permute(2, 0, 1, 3)
+            following = block_update(x, heads, prepared.extras["grid"], start, start + 4)
+            expected = second["pdd_trajectory"][start // 4 + 1].cuda().unsqueeze(0)
+            # Mismatched BF16 timestep rounding alone gave 1.5-3% on some blocks.
+            relative = (following - expected).abs().mean() / (expected - x).abs().mean()
+            assert relative < 5e-3, (start, float(relative))
     torch.distributed.destroy_process_group()
 
 

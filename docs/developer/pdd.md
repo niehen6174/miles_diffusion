@@ -165,6 +165,7 @@ python -m pytest tests/fast-gpu/backends/sglang_diffusion_utils/test_pdd_sglang_
 
 The GPU smoke uses real native SGLang stages, the response parser, a one-rank
 FSDP tiny model, the PDD teacher loss, the Miles weight iterator and SGLang's
-weight receiver for two iterations. It does not exercise the HTTP/Ray driver,
-pretrained image quality or multi-GPU placement. TP/SP greater than one, dynamic
+weight receiver: one rollout, eight updates and a sync, then checks every block of
+the next rollout against the trainer within 0.5%. It does not exercise the
+HTTP/Ray driver, pretrained image quality or multi-GPU placement. TP/SP greater than one, dynamic
 batching, Cache-DiT and compiled/graph execution are not supported in this mode.
