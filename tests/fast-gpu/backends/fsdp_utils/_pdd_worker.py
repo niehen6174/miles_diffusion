@@ -23,7 +23,7 @@ from miles.backends.fsdp_utils.loss_hub.types import DiffusionLossContext
 from miles.backends.fsdp_utils.model_backend import DiffusersModelBackend
 from miles.backends.fsdp_utils.model_loader import load_fsdp_models
 from miles.distillation.integration import install_student
-from miles.distillation.pdd import block_update, pdd_loss
+from miles.distillation.pdd import pdd_loss
 
 
 def tiny(dtype=torch.float32):
@@ -89,6 +89,7 @@ def main():
     )
     config = QwenImage21TrainPipelineConfig()
     config.configure(args)
+    config.prepare_cond_kwargs = lambda cond, device: cond  # synthetic conditioning, not a rollout env
     backend = Backend(config)
     models = load_fsdp_models(args, backend, config, parallel, checkpoint_path="tiny", trainable=True)
     teachers = load_fsdp_models(args, backend, config, parallel, checkpoint_path="tiny", trainable=False)
@@ -109,6 +110,9 @@ def main():
         "img_mask": torch.tensor([[False] * 3 + [True] * 4], device=device),
         "img_shapes": [[(1, 4, 4)]],
     }
+    # A rollout trajectory: the eight block states plus the endpoint, BF16-rounded like the engine's noise.
+    trajectory = torch.randn(9, 16, 4).bfloat16().float()
+    env = SimpleNamespace(pos_cond_kwargs=cond)
     ctx = DiffusionLossContext(
         models=models,
         teacher_models=teachers,
@@ -121,15 +125,13 @@ def main():
     )
     max_output = 0.0
     max_grad = 0.0
-    refstate = None
     for start in range(0, 32, 4):
         optimizer.zero_grad()
         refopt.zero_grad()
-        pair = {"sample_index": rank, "pdd_start": start, "cond_kwargs": cond}
+        pair = {"sample_index": rank, "pdd_start": start, "pdd_trajectory": trajectory, "denoising_env": env}
         prepared = prepare_pdd_batch(ctx, [pair])
         x = prepared.latents["visual"]
-        if refstate is not None:
-            torch.testing.assert_close(x, refstate, rtol=2e-4, atol=2e-5)
+        torch.testing.assert_close(x[0].cpu(), trajectory[start // 4], rtol=0, atol=0)
         with torch.autocast("cuda", dtype=torch.bfloat16):
             pred = config.compute_noise_pred(
                 model=model,
@@ -144,7 +146,8 @@ def main():
                 true_cfg_scale=1.0,
             )
             # Unsharded student: keep the image-token tail, split into [head, batch, token, channel].
-            refpred = reference(hidden_states=x, timestep=grid[start].expand(1), return_dict=False, **cond)[0]
+            model_sigma = prepared.timesteps_for_model["visual"]
+            refpred = reference(hidden_states=x, timestep=model_sigma, return_dict=False, **cond)[0]
             refpred = refpred[:, -16:].reshape(1, 16, 32, 4).permute(2, 0, 1, 3)
             loss = pdd_loss_formula(
                 ctx, [pair], prepared, new_pred=pred, old_pred=None, ref_pred=None, metrics=Metrics()
@@ -165,7 +168,6 @@ def main():
         max_output = max(max_output, err)
         torch.testing.assert_close(pred["visual"], rawref, rtol=0, atol=0)
         torch.testing.assert_close(loss, refloss, rtol=0, atol=0)
-        refstate = block_update(x, refpred, grid, start, start + 4).detach()
         loss.backward()
         refloss.backward()
         for (name, p), (rname, r) in zip(model.named_parameters(), reference.named_parameters(), strict=True):
@@ -178,7 +180,7 @@ def main():
                 torch.testing.assert_close(grad, r.grad, rtol=2e-5, atol=2e-6, msg=name)
         optimizer.step()
         refopt.step()
-    assert not ctx.algorithm_state["lanes"] and all(p.grad is None for p in teacher.parameters())
+    assert all(p.grad is None for p in teacher.parameters())
     for name, p in full(model).items():
         torch.testing.assert_close(p, reference.state_dict()[name], rtol=2e-5, atol=2e-6, msg=name)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)

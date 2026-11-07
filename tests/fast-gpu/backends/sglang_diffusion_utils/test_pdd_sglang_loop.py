@@ -60,7 +60,7 @@ def worker(output):
     from miles.backends.sglang_diffusion_utils.monkey_patches import patch_pdd_qwen_image21
     from miles.distillation.integration import expand_trajectories, install_student, make_grid
     from miles.distillation.pdd import block_update
-    from miles.rollout.pdd_online import convert_samples_to_train_data
+    from miles.rollout.pdd_rollout import convert_samples_to_train_data
     from miles.utils.diffusion_rollout_response import _parse_denoising_env, _parse_dit_trajectory
     from miles.utils.types import Sample
 
@@ -101,7 +101,6 @@ def worker(output):
     args = SimpleNamespace(
         pdd_num_intervals=32,
         pdd_block_size=4,
-        pdd_online=True,
         hf_checkpoint=str(model_path),
         diffusion_height=1024,
         diffusion_width=1024,
@@ -222,7 +221,6 @@ def worker(output):
         loss.backward()
         assert all(p.grad is None for p in teacher.parameters())
         optimizer.step()
-    assert not ctx.algorithm_state["lanes"]
     sync()
 
     # The trained heads now drive the engine; each block must match the trainer's.

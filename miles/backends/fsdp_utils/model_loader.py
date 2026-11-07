@@ -70,8 +70,7 @@ def load_fsdp_models(
         )
         checkpoint.broadcast_full_state_to_fsdp(model, full_state, cpu_offload=cpu_offload)
         del full_state
-        if not is_pdd or getattr(args, "pdd_online", False):
-            train_pipeline_config.postprocess_model_after_materialize(model)
+        train_pipeline_config.postprocess_model_after_materialize(model)
         if parallel_state.get_optional_mesh("sp") is not None:
             apply_sequence_parallel(
                 model,

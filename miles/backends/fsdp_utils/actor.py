@@ -472,9 +472,6 @@ class FSDPTrainRayActor(TrainRayActor):
                 reduced = {f"train/{key}": value for key, value in metrics.reduce().items()}
                 self._log_metrics(rollout_id, reduced, step=self.global_step)
 
-        if self.args.loss_type == "pdd" and loss_ctx.algorithm_state.get("lanes"):
-            raise RuntimeError("PDD rollout ended with unfinished trajectories; refusing checkpoint boundary")
-
     def _maybe_legacy_window_pad_len(self, train_pairs: list, microbatch_ranges: list) -> int | None:
         """LEGACY 2D parity: the whole-window max cond seq_len (like the legacy tile path), or
         None unless the legacy --micro-batch-size-sample>1 path is active. TODO: remove with it."""

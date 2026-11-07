@@ -65,7 +65,7 @@ def apply():
     )
     from sglang.multimodal_gen.runtime.pipelines_core.stages.timestep_preparation import TimestepPreparationStage
 
-    if getattr(QwenImage21DenoisingStage, "_miles_pdd_online", False):
+    if getattr(QwenImage21DenoisingStage, "_miles_pdd", False):
         return
     original_load = QwenImage21Transformer2DModel.post_load_weights
     original_time = TimestepPreparationStage.forward
@@ -83,7 +83,7 @@ def apply():
         if not isinstance(server_args.pipeline_config, QwenImage21PipelineConfig):
             return original_time(self, batch, server_args)
         if (batch.height, batch.width, batch.num_inference_steps) != (1024, 1024, 8):
-            raise ValueError("PDD online requires 1024x1024 and 8 steps")
+            raise ValueError("PDD requires 1024x1024 and 8 steps")
         batch = original_time(self, batch, server_args)
         grid = make_grid(server_args.model_path, 32, 4096, batch.timesteps.device)
         batch.timesteps = engine_timesteps(grid[:-1:4]).to(grid.device)
@@ -94,13 +94,13 @@ def apply():
 
     def prepare(self, batch, server_args):
         if server_args.enable_torch_compile or server_args.enable_breakable_cuda_graph or server_args.cache_dit_config:
-            raise ValueError("PDD online graph/Cache-DiT modes are not validated")
+            raise ValueError("PDD graph/Cache-DiT modes are not validated")
         if server_args.dit_layerwise_offload or server_args.use_fsdp_inference:
-            raise ValueError("PDD online requires a resident native transformer")
+            raise ValueError("PDD requires a resident native transformer")
         if len(batch.extra["qwen21_positive"]["layouts"]) != 1:
-            raise ValueError("PDD online requires batch size 1")
+            raise ValueError("PDD requires batch size 1")
         if batch.extra["qwen21_positive"].get("condition_latents") is not None:
-            raise ValueError("PDD online does not support image conditioning")
+            raise ValueError("PDD does not support image conditioning")
         batch.latents = batch.latents.bfloat16().float()
         ctx = original_prepare(self, batch, server_args)
         if not isinstance(self.transformer.proj_out, PDDProjection):
@@ -134,4 +134,4 @@ def apply():
     QwenImage21PipelineConfig.supports_dynamic_batching = lambda self: False
     QwenImage21DenoisingStage._prepare_denoising_loop = prepare
     QwenImage21DenoisingStage._run_denoising_step = step
-    QwenImage21DenoisingStage._miles_pdd_online = True
+    QwenImage21DenoisingStage._miles_pdd = True
